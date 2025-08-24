@@ -20,7 +20,11 @@ class CameraMonitor(hass.Hass):
         self.brightness_threshold = int(self.args["brightness_threshold"])
         self.poll_frequency = float(self.args["poll_frequency"])
         with open(self.args["model_file"], "rb") as f:
-            self.classifier : GaussianNB = pickle.load(f)
+            data = pickle.load(f)
+        self.classifier : GaussianNB = data["model"]
+        self.label_lookup : dict[int, str] = data["label_lookup"]
+
+        self.log(f"Loaded model with labels: {self.label_lookup}")
 
         self.bg_model = TimestampAwareBackgroundSubtractor(
             history_seconds=self.args["history_seconds"],
@@ -42,6 +46,8 @@ class CameraMonitor(hass.Hass):
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self._last_cleanup_time = float("-inf")
+
+        self.trigger_class = self.args["watch_for_class"]
 
         self.sensor = self.get_entity(self.args["hass_sensor_entity"])
         self.sensor.set_state("off")
@@ -72,7 +78,7 @@ class CameraMonitor(hass.Hass):
             frame = cv.imdecode(image_array, cv.IMREAD_COLOR)
             return frame
         else:
-            print("Failed to get frame from source:", resp.status_code)
+            self.log(f"Failed to get frame from source: {resp.status_code}", level="WARNING")
             return None
 
 
@@ -93,13 +99,17 @@ class CameraMonitor(hass.Hass):
 
         # classify those buggers
         for blob in blobs:
-            pred = self.classifier.predict(featurize(blob))
-            print(yyyymmdd_hhmmss, "CLASS", pred)
-            self.handle_detection(pred)
+            pred_class_int = self.classifier.predict(featurize(blob)).item()
+            pred_label = self.label_lookup[pred_class_int]
+            self.log(f"{yyyymmdd_hhmmss} CLASS {pred_label}", level="INFO")
+            self.handle_detection(pred_label)
 
-    def handle_detection(self, y):
-        self.detections.append(y)
-        if np.all(d == 1 for d in self.detections):
-            self.sensor.set_state("on")
-        else:
+    def handle_detection(self, label: str):
+        self.detections.append(label)
+        if all(d == self.trigger_class for d in self.detections) and len(self.detections) == self.detections.maxlen:
+            if self.sensor.state != "on":
+                self.log(f"DETECTED {self.trigger_class}", level="WARNING")
+                self.sensor.set_state("on")
+        elif self.sensor.state != "off":
+            self.log(f"DEACTIVATED {self.trigger_class}", level="INFO")
             self.sensor.set_state("off")
