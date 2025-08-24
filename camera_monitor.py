@@ -7,6 +7,7 @@ import requests
 from sklearn.naive_bayes import GaussianNB
 from background_model import TimestampAwareBackgroundSubtractor
 from image_loader import get_all_timestamped_files_sorted
+from classifier import featurize
 import pickle
 import time
 from collections import deque
@@ -55,7 +56,7 @@ class CameraMonitor(hass.Hass):
         self.maybe_cleanup()
     
 
-    def maybe_cleanup():
+    def maybe_cleanup(self):
         now = time.time()
         if now - self._last_cleanup_time > 24 * 60 * 60:
             for t, f in get_all_timestamped_files_sorted(self.output_dir, glob="*.png"):
