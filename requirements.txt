@@ -1,0 +1,4 @@
+numpy
+opencv-contrib-python-headless
+requests
+scikit-learn
