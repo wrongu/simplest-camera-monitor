@@ -16,7 +16,6 @@ from collections import deque
 class CameraMonitor(hass.Hass):
     def initialize(self):
         self.source = self.args["url"]
-        self.min_area = int(self.args["min_area"])
         self.brightness_threshold = int(self.args["brightness_threshold"])
         self.poll_frequency = float(self.args["poll_frequency"])
         with open(self.args["model_file"], "rb") as f:
