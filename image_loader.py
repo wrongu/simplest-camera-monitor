@@ -10,10 +10,12 @@ timestamp_file_regex = re.compile(
 
 timestamp_path_regex = re.compile(
     (re.escape(os.path.sep)).join(
-        r"(?P<year>\d{4})",
-        r"(?P<month>\d{2})",
-        r"(?P<day>\d{2})",
-        r"(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})",
+        [
+            r"(?P<year>\d{4})",
+            r"(?P<month>\d{2})",
+            r"(?P<day>\d{2})",
+            r"(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})",
+        ]
     )
 )
 
@@ -30,13 +32,18 @@ def is_datetime_named(file: Path) -> bool:
     [OLD] A file is considered renamed if it starts with a timestamp in the format YYYYMMDD_HHMMSS.
     [NEW] A file is considered renamed if its name or any part of its path contains a timestamp in the format YYYY/MM/DD/HHMMSS.
     """
-    return timestamp_file_regex.match(file.name) is not None or timestamp_path_regex.search(str(file)) is not None
+    return (
+        timestamp_file_regex.match(file.name) is not None
+        or timestamp_path_regex.search(str(file)) is not None
+    )
 
 
 def get_file_time(file: Path) -> float:
     """Get the file timestamp; in a first pass, this is the file modification time. Files are then
     renamed based on this timestamp."""
-    match = timestamp_path_regex.match(str(file)) or timestamp_file_regex.match(file.name)
+    match = timestamp_path_regex.match(str(file)) or timestamp_file_regex.match(
+        file.name
+    )
     if match:
         year = int(match.group("year"))
         month = int(match.group("month"))
