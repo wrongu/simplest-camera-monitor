@@ -6,7 +6,7 @@ import requests
 
 from sklearn.naive_bayes import GaussianNB
 from background_model import TimestampAwareBackgroundSubtractor
-from image_loader import get_all_timestamped_files_sorted
+from image_loader import ensure_files_timestamp_named, get_all_timestamped_files_sorted
 from classifier import featurize
 import pickle
 import time
@@ -64,7 +64,9 @@ class CameraMonitor(hass.Hass):
     def maybe_cleanup(self):
         now = time.time()
         if now - self._last_cleanup_time > 24 * 60 * 60:
-            for t, f in get_all_timestamped_files_sorted(self.output_dir, glob="*.png"):
+            ensure_files_timestamp_named(self.output_dir, dry_run=False, glob="**/*.jpg")
+
+            for t, f in get_all_timestamped_files_sorted(self.output_dir, glob="**/*.jpg"):
                 if now - t > 5 * 24 * 60 * 60:
                     f.unlink()
             self._last_cleanup_time = now
@@ -89,7 +91,7 @@ class CameraMonitor(hass.Hass):
             return
         
         # save the image
-        yyyymmdd_hhmmss = time.strftime("%Y%m%d_%H%M%S", now)
+        yyyymmdd_hhmmss = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
         out_file = self.output_dir / f"{yyyymmdd_hhmmss}.png"
         cv.imwrite(str(out_file), frame)
 
