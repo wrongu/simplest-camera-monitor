@@ -18,6 +18,12 @@ timestamp_path_regex = re.compile(
 )
 
 
+def create_timestamped_filename(timestamp: float, suffix: str) -> str:
+    """Create a filename based on a timestamp."""
+    tmp = time.strftime("%Y____%m____%d____%H%M%S", time.localtime(timestamp)) + suffix
+    return tmp.replace("____", os.path.sep)
+
+
 def is_datetime_named(file: Path) -> bool:
     """
     Check if the file has been renamed based on its name.
@@ -68,9 +74,7 @@ def ensure_files_timestamp_named(directory: Path, dry_run: bool, glob="**/*.jpg"
 
         if rename_timestamp is not None:
             # Convert to a timestamp-path format to create a filename and path from the timestamp
-            formatted_time = time.strftime("%Y____%m____%d____%H%M%S", time.localtime(rename_timestamp))
-            formatted_time = formatted_time.replace("____", os.path.sep)
-            new_name = f"{formatted_time}{file.suffix}"
+            new_name = create_timestamped_filename(rename_timestamp, file.suffix)
             new_path = file.parent / new_name
 
             if dry_run:
