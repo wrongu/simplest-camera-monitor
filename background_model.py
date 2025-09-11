@@ -121,12 +121,18 @@ class TimestampAwareBackgroundSubtractor(object):
             if brightness_correlation > self.shadow_correlation_threshold:
                 continue
 
+
+            # Calculate additional features that may be used in classification
+            moments = cv.moments((labels == i).astype(np.uint8))
             blobs.append(
                 {
                     "area": stats[i, cv.CC_STAT_AREA],
                     "centroid": centroids[i],
                     "bounding_box": stats[i, :4],  # x, y, width, height
                     "mask": labels == i,
+                    "fg_bgr": np.median(current_blob, axis=0).tolist(),
+                    "bg_bgr": np.median(background_blob, axis=0).tolist(),
+                    **moments,
                 }
             )
 

@@ -30,7 +30,7 @@ def featurize(blob):
     bg_xy = np.array(bgr_to_xy(*blob["bg_bgr"]))
     color_features = [*fg_xy, *bg_xy]
     # return blob["moments"] + [blob["area"]] + color_features
-    return [np.log(blob["area"])] + color_features
+    return [np.log1p(blob["area"])] + color_features
 
 
 def _sanity_check_labels(annotations: dict):
