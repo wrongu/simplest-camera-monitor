@@ -208,7 +208,7 @@ class CameraMonitor(hass.Hass):
 
             # classify those buggers
             for i, blob in enumerate(blobs):
-                pred_class_int = self.classifier.predict(featurize(blob).reshape(1, -1)).item()
+                pred_class_int = self.classifier.predict(featurize(blob)).item()
                 pred_label = self.label_lookup[pred_class_int]
                 self.log(
                     f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))} CLASS {pred_label}",
