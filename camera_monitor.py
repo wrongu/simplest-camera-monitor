@@ -100,8 +100,9 @@ class CameraMonitor(hass.Hass):
             return
 
         # save the image
-        out_file = self.output_dir / create_timestamped_filename(timestamp, "jpg")
+        out_file = self.output_dir / create_timestamped_filename(timestamp, ".jpg")
         if not out_file.exists():
+            self.log(f"Writing image to {out_file}")
             out_file.parent.mkdir(parents=True, exist_ok=True)
             cv.imwrite(str(out_file), frame)
 
@@ -144,3 +145,4 @@ class CameraMonitor(hass.Hass):
                     self.log(f"\t{f}")
                     self.process_frame(frame, timestamp=None, detect_stuff=False)
         self.log("Reinitialization complete.")
+
