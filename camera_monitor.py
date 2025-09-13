@@ -204,14 +204,23 @@ class CameraMonitor(hass.Hass):
         if detect_stuff:
             _, blobs = self.bg_model.applyWithStats(frame, timestamp)
 
+            self.log(f"Detected {len(blobs)} blobs", level="DEBUG")
+
             # classify those buggers
-            for blob in blobs:
+            for i, blob in enumerate(blobs):
                 pred_class_int = self.classifier.predict(featurize(blob)).item()
                 pred_label = self.label_lookup[pred_class_int]
                 self.log(
                     f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))} CLASS {pred_label}",
                     level="INFO",
                 )
+
+                # Debugging: write out some images containing blob info
+                blob_file = self.output_dir / "blobs" / create_timestamped_filename(timestamp, f"_{i}_{pred_label}.jpg")
+                if not blob_file.exists():
+                    blob_file.parent.mkdir(parents=True, exist_ok=True)
+                    cv.imwrite(str(blob_file), (blob["mask"] * 255).astype(np.uint8))
+
                 self.handle_detection(pred_label)
         else:
             self.bg_model.apply(frame, timestamp)
