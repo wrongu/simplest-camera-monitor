@@ -127,7 +127,7 @@ class CameraMonitor(hass.Hass):
             self.state_machine = new_state
             self.state_meta = meta
 
-            if new_state in (State.CANT_CONNECT, State.CRASHED, State.TOO_DARK):
+            if new_state in (State.CANT_CONNECT, State.CRASHED, State.REBOOT):
                 self.sensor.set_state("unavailable")
 
     def poll(self, **kwargs):
