@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import appdaemon.plugins.hass.hassapi as hass
 import cv2 as cv
 import numpy as np
@@ -15,14 +16,70 @@ from classifier import featurize
 import pickle
 import time
 from collections import deque
+from enum import Enum
 
 
 ONE_DAY_SECONDS = 24 * 60 * 60
 
 
+class State(Enum):
+    INIT = -1
+    RUNNING = 0
+    CANT_CONNECT = 1
+    CRASHED = 2
+    REBOOT = 3
+
+
+class ESPHomeCameraWrapper(object):
+    def __init__(self, url: str):
+        self.url = url
+        self.last_frame = None
+        self.last_frame_time = 0
+        # TODO - consider using the event stream API and keeping a persistent app:camera http connection open
+        self.components = {"switch/reboot": None, "switch/flash": None}
+        self.poll_components()
+
+    def get_frame(self):
+        resp = requests.get(self.url, timeout=10)
+        if resp.status_code == 200:
+            image_array = np.asarray(bytearray(resp.content), dtype=np.uint8)
+            frame = cv.imdecode(image_array, cv.IMREAD_COLOR)
+            self.last_frame = frame
+            self.last_frame_time = time.time()
+            return frame
+        else:
+            raise ConnectionError(f"Failed to get frame: {resp.status_code}")
+
+    def get_last_frame(self):
+        if self.last_frame is not None and (time.time() - self.last_frame_time) < 5:
+            return self.last_frame
+        else:
+            return self.get_frame()
+        
+    def poll_components(self):
+        for comp in self.components.keys():
+            try:
+                resp = requests.get(self.url + f"/{comp}/", timeout=2)
+                if resp.status_code == 200:
+                    self.components[comp] = resp.json()
+                else:
+                    self.components[comp] = None
+            except Exception as e:
+                self.components[comp] = None
+
+    def reboot(self) -> bool:
+        if self.components.get("switch/reboot") is not None:
+            try:
+                resp = requests.post(self.url + "/switch/reboot/turn_on", timeout=5)
+                return resp.status_code == 200
+            except Exception as e:
+                print(f"Failed to send reboot request: {e}")
+                return False
+
+
 class CameraMonitor(hass.Hass):
     def initialize(self):
-        self.source = self.args["url"]
+        self.camera = ESPHomeCameraWrapper(self.args["url"])
         self.brightness_threshold = int(self.args["brightness_threshold"])
         self.poll_frequency = float(self.args["poll_frequency"])
         with open(self.args["model_file"], "rb") as f:
@@ -48,6 +105,10 @@ class CameraMonitor(hass.Hass):
         self.output_dir = Path("/media/front camera/")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+        self.state_machine = State.INIT
+        self.state_meta = None
+        self.state_transition(State.RUNNING, since=time.time())
+
         self.reinitialize_bg_model_from_saved_images()
 
         self._last_cleanup_time = float("-inf")
@@ -59,10 +120,55 @@ class CameraMonitor(hass.Hass):
 
         self.run_every(self.poll, interval=self.poll_frequency)
 
+    def state_transition(self, new_state: State, **meta):
+        old_state = self.state_machine
+        if old_state != new_state:
+            self.log(f"State transition {old_state} -> {new_state}")
+            self.state_machine = new_state
+            self.state_meta = meta
+
+            if new_state in (State.CANT_CONNECT, State.CRASHED, State.TOO_DARK):
+                self.sensor.set_state("unavailable")
+
     def poll(self, **kwargs):
-        frame = self.get_frame()
-        if frame is not None:
-            self.process_frame(frame)
+        if self.state_machine == State.RUNNING:
+            try:
+                frame = self.camera.get_frame()
+            except ConnectionError:
+                self.state_transition(State.CANT_CONNECT, since=time.time())
+            if frame is not None:
+                self.process_frame(frame)
+        
+        elif self.state_machine == State.CANT_CONNECT:
+            # For the first minute of not being able to connect, just keep trying
+            if time.time() - self.state_meta.get("since", 0) < 60:
+                try:
+                    frame = self.camera.get_frame()
+                    self.state_transition(State.RUNNING, since=time.time())
+                    self.process_frame(frame)
+                except ConnectionError:
+                    pass
+            # After a minute, try sending a reboot signal to the camera
+            else:
+                self.log("Attempting to reboot camera via HTTP request")
+                if self.camera.reboot():
+                    self.log("Reboot request sent successfully")
+                    self.state_transition(State.REBOOT, since=time.time())
+                else:
+                    self.log("Failed to send reboot request", level="WARNING")
+                    self.state_transition(State.CRASHED, since=time.time())
+        
+        elif self.state_machine == State.REBOOT:
+            # Wait 30 seconds after sending the reboot command, then try to connect again
+            if time.time() - self.state_meta.get("since", 0) > 30:
+                try:
+                    frame = self.camera.get_frame()
+                    self.state_transition(State.RUNNING, since=time.time())
+                    self.process_frame(frame)
+                except ConnectionError:
+                    self.log("Still cannot connect after reboot attempt", level="WARNING")
+                    self.state_transition(State.CRASHED, since=time.time())
+
         self.maybe_cleanup()
 
     def maybe_cleanup(self):
@@ -78,18 +184,6 @@ class CameraMonitor(hass.Hass):
                 if now - t > 3 * ONE_DAY_SECONDS:
                     f.unlink()
             self._last_cleanup_time = now
-
-    def get_frame(self):
-        resp = requests.get(self.source, timeout=10)
-        if resp.status_code == 200:
-            image_array = np.asarray(bytearray(resp.content), dtype=np.uint8)
-            frame = cv.imdecode(image_array, cv.IMREAD_COLOR)
-            return frame
-        else:
-            self.log(
-                f"Failed to get frame from source: {resp.status_code}", level="WARNING"
-            )
-            return None
 
     def process_frame(self, frame, timestamp=None, detect_stuff=True):
         if timestamp is None:
@@ -145,4 +239,3 @@ class CameraMonitor(hass.Hass):
                     self.log(f"\t{f}")
                     self.process_frame(frame, timestamp=None, detect_stuff=False)
         self.log("Reinitialization complete.")
-
