@@ -1,13 +1,14 @@
-from pathlib import Path
-import pickle
-
-from sklearn.naive_bayes import GaussianNB
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-from typing import Optional
-import cv2 as cv
 import json
+import pickle
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
+from sklearn.metrics import classification_report
+from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import GaussianNB
+
+from background_model import ForegroundBlob
 
 
 def bgr_to_xy(b, g, r):
@@ -25,12 +26,15 @@ def bgr_to_xy(b, g, r):
     return X / (X + Y + Z), Y / (X + Y + Z)
 
 
-def featurize(blob):
-    fg_xy = np.array(bgr_to_xy(*blob["fg_bgr"]))
-    bg_xy = np.array(bgr_to_xy(*blob["bg_bgr"]))
+def featurize(blob: ForegroundBlob) -> np.ndarray:
+    # moments = cv.moments(blob.mask)
+    fg_bgr = np.median(blob.image[blob.mask > 0, :], axis=0)
+    bg_bgr = np.median(blob.background[blob.mask > 0, :], axis=0)
+    fg_xy = np.array(bgr_to_xy(*fg_bgr))
+    bg_xy = np.array(bgr_to_xy(*bg_bgr))
     color_features = [*fg_xy, *bg_xy]
     # return blob["moments"] + [blob["area"]] + color_features
-    return np.array([np.log1p(blob["area"])] + color_features).reshape(1, -1)
+    return np.array([np.log1p(blob.area)] + color_features).reshape(1, -1)
 
 
 def _sanity_check_labels(annotations: dict):
@@ -57,8 +61,7 @@ def _sanity_check_labels(annotations: dict):
 
 
 def load_annotations_as_data(
-    annotations_file: Path,
-    binary_detection: Optional[str] = None
+    annotations_file: Path, binary_detection: Optional[str] = None
 ) -> tuple[np.ndarray, np.ndarray, list[str], list[list[int]], dict[int, str]]:
     """Convert JSON dict of annotations to (X, y, files, bboxes)"""
     if not annotations_file.exists():
@@ -70,11 +73,15 @@ def load_annotations_as_data(
     _sanity_check_labels(annotations)
 
     if binary_detection is not None:
-        label_handler = lambda lbl: 1 if annotations["labels"][lbl] == binary_detection else 0
+        label_handler = lambda lbl: (
+            1 if annotations["labels"][lbl] == binary_detection else 0
+        )
         label_lookup = {0: f"not {binary_detection}", 1: binary_detection}
     else:
         label_handler = int
-        label_lookup = {int(lbl): annotations["labels"][lbl] for lbl in annotations["labels"]}
+        label_lookup = {
+            int(lbl): annotations["labels"][lbl] for lbl in annotations["labels"]
+        }
 
     features, labels, files, bboxes = [], [], [], []
     n_loaded, n_skipped = 0, 0
@@ -130,7 +137,7 @@ if __name__ == "__main__":
         "--binary-detection",
         type=str,
         default=None,
-        help="Optional label to focus on, making a binary classifier (e.g. 'person' vs 'not person')"
+        help="Optional label to focus on, making a binary classifier (e.g. 'person' vs 'not person')",
     )
     parser.add_argument(
         "--model_file",
@@ -245,6 +252,8 @@ if __name__ == "__main__":
         classification_report(
             y_test,
             y_pred,
-            target_names=[label_lookup[i] for i in range(len(label_lookup)) if i in set(y_test)],
+            target_names=[
+                label_lookup[i] for i in range(len(label_lookup)) if i in set(y_test)
+            ],
         )
     )

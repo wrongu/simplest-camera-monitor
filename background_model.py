@@ -1,10 +1,20 @@
+import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Optional
 
 import cv2 as cv
-import time
-
 import numpy as np
+
+
+@dataclass
+class ForegroundBlob:
+    background: cv.Mat
+    image: cv.Mat
+    area: int
+    bbox: tuple[int, int, int, int]  # x, y, width, height
+    mask: cv.Mat
+    class_id: Optional[str] = None
 
 
 class TimestampAwareBackgroundSubtractor(object):
@@ -32,7 +42,9 @@ class TimestampAwareBackgroundSubtractor(object):
         self.kernel_cleanup = cv.getStructuringElement(
             cv.MORPH_ELLIPSE, (kernel_cleanup, kernel_cleanup)
         )
-        self.kernel_close = cv.getStructuringElement(cv.MORPH_ELLIPSE, (kernel_close, kernel_close))
+        self.kernel_close = cv.getStructuringElement(
+            cv.MORPH_ELLIPSE, (kernel_close, kernel_close)
+        )
 
         self.model = None
         self.instantiate_model()
@@ -43,7 +55,8 @@ class TimestampAwareBackgroundSubtractor(object):
             # Not enough data to calculate FPS, return the last calculated FPS
             return self._last_calculated_fps
         time_deltas = [
-            self._recents[i][0] - self._recents[i - 1][0] for i in range(1, len(self._recents))
+            self._recents[i][0] - self._recents[i - 1][0]
+            for i in range(1, len(self._recents))
         ]
         median_delta = sorted(time_deltas)[len(time_deltas) // 2]
         self._last_calculated_fps = 1.0 / median_delta
@@ -86,7 +99,9 @@ class TimestampAwareBackgroundSubtractor(object):
         self._recents.append((t, img))
         return self.model.apply(img)
 
-    def applyWithStats(self, img: cv.Mat, t: Optional[float] = None):
+    def applyWithStats(
+        self, img: cv.Mat, t: Optional[float] = None
+    ) -> tuple[cv.Mat, list[ForegroundBlob]]:
         mask = self.apply(img, t)
 
         # No stats if we don't have enough images
@@ -121,19 +136,16 @@ class TimestampAwareBackgroundSubtractor(object):
             if brightness_correlation > self.shadow_correlation_threshold:
                 continue
 
-
-            # Calculate additional features that may be used in classification
-            moments = cv.moments((labels == i).astype(np.uint8))
+            # Append this foreground blob info to the list; note that each blob shares the same
+            # background and image object references but has a different mask
             blobs.append(
-                {
-                    "area": stats[i, cv.CC_STAT_AREA],
-                    "centroid": centroids[i],
-                    "bounding_box": stats[i, :4],  # x, y, width, height
-                    "mask": labels == i,
-                    "fg_bgr": np.median(current_blob, axis=0).tolist(),
-                    "bg_bgr": np.median(background_blob, axis=0).tolist(),
-                    **moments,
-                }
+                ForegroundBlob(
+                    background=background,
+                    image=img,
+                    area=stats[i, cv.CC_STAT_AREA],
+                    bbox=stats[i, :4],  # x, y, width, height
+                    mask=np.array(labels == i).astype(np.uint8) * clean_mask
+                )
             )
 
         return mask, blobs
