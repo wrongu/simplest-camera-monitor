@@ -1,8 +1,7 @@
-from pathlib import Path
-import time
-import re
 import os
-
+import re
+import time
+from pathlib import Path
 
 timestamp_file_regex = re.compile(
     r"^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})_(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})"
@@ -33,8 +32,8 @@ def is_datetime_named(file: Path) -> bool:
     [NEW] A file is considered renamed if its name or any part of its path contains a timestamp in the format YYYY/MM/DD/HHMMSS.
     """
     return (
-        timestamp_file_regex.match(file.name) is not None
-        or timestamp_path_regex.search(str(file)) is not None
+            timestamp_file_regex.match(file.name) is not None
+            or timestamp_path_regex.search(str(file)) is not None
     )
 
 
@@ -59,7 +58,7 @@ def get_file_time(file: Path) -> float:
 
 
 def get_all_timestamped_files_sorted(
-    directory: Path, glob="**/*.jpg"
+        directory: Path, glob="**/*.jpg"
 ) -> list[tuple[float, Path]]:
     return sorted([(get_file_time(f), f) for f in directory.glob(glob)])
 
@@ -107,6 +106,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Perform a dry run without renaming files.",
     )
+    parser.add_argument(
+        "--glob",
+        type=str,
+        default="**/*.jpg",
+        help="Glob pattern to match files (default: '**/*.jpg').",
+    )
     args = parser.parse_args()
 
-    ensure_files_timestamp_named(args.directory, dry_run=args.dry_run)
+    ensure_files_timestamp_named(args.directory, dry_run=args.dry_run, glob=args.glob)
