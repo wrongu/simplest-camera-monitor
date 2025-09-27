@@ -59,12 +59,16 @@ class TimestampAwareBackgroundSubtractor(object):
             for i in range(1, len(self._recents))
         ]
         median_delta = sorted(time_deltas)[len(time_deltas) // 2]
-        self._last_calculated_fps = 1.0 / median_delta
+        self._last_calculated_fps = 1.0 / max(median_delta, 1e-2)
         return self._last_calculated_fps
 
     @property
     def last_timestamp(self) -> float:
         return self._recents[-1][0] if self._recents else 0.0
+
+    def reset(self):
+        self._recents.clear()
+        self.instantiate_model()
 
     def instantiate_model(self):
         fps_adaptive_history = int(self._history_seconds * self.fps)
@@ -81,7 +85,7 @@ class TimestampAwareBackgroundSubtractor(object):
         if t is None:
             t = time.time()
 
-        if t <= self.last_timestamp:
+        if t < self.last_timestamp:
             raise ValueError(
                 f"Images must be given in chronological order but "
                 f"last timestamp is {self.last_timestamp} and new timestamp is {t}."

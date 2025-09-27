@@ -40,7 +40,8 @@ class CameraMonitor(object):
 
         self.bg_model = bg_model
 
-        if output_dir is not None:
+        self.output_dir = output_dir
+        if self.output_dir is not None:
             self.output_dir = Path(output_dir)
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self.reinitialize_bg_model_from_saved_images()
@@ -101,9 +102,10 @@ class CameraMonitor(object):
                         )
             return blobs
 
-    def reinitialize_bg_model_from_saved_images(self):
+    def reinitialize_bg_model_from_saved_images(self, now=None):
         self.log("Reinitializing background model from saved images...")
-        now = time.time()
+        if now is None:
+            now = time.time()
         for t, f in get_all_timestamped_files_sorted(self.output_dir, glob="**/*.jpg"):
             if 0 < (now - t) < self.history_seconds:
                 frame = cv.imread(str(f))
