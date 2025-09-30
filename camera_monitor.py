@@ -46,6 +46,11 @@ class CameraMonitor(object):
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self.reinitialize_bg_model_from_saved_images()
 
+    @staticmethod
+    def _save_image(path: Path, image: cv.Mat):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cv.imwrite(str(path), image)
+
     def process_frame(
         self, frame: cv.Mat, timestamp: float, detect_stuff=True
     ) -> list[ForegroundBlob]:
@@ -58,11 +63,9 @@ class CameraMonitor(object):
 
         # save the image
         if self.output_dir is not None:
-            out_file = self.output_dir / create_timestamped_filename(timestamp, ".jpg")
-            if not out_file.exists():
-                self.log(f"Writing image to {out_file}")
-                out_file.parent.mkdir(parents=True, exist_ok=True)
-                cv.imwrite(str(out_file), frame)
+            self._save_image(
+                self.output_dir / create_timestamped_filename(timestamp, ".jpg"), frame
+            )
 
         # update bg model and maybe detect stuff
         if not detect_stuff:
@@ -71,42 +74,37 @@ class CameraMonitor(object):
         else:
             _, blobs = self.bg_model.applyWithStats(frame, timestamp)
 
-            self.log(f"Detected {len(blobs)} blobs", level="DEBUG")
-
-            if self.classifier is None:
-                return blobs
-
             # classify those buggers
             for i, blob in enumerate(blobs):
-                pred_class_int = self.classifier.predict(featurize(blob)).item()
-                blob.class_id = self.label_lookup.get(pred_class_int, "unknown")
-                self.log(
-                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))} CLASS {blob.class_id}",
-                    level="INFO",
-                )
+                if self.classifier is not None:
+                    pred_class_int = self.classifier.predict(featurize(blob)).item()
+                    blob.class_id = self.label_lookup.get(pred_class_int, "unknown")
 
                 # Debugging: write out some images containing blob info
                 if self.output_dir is not None:
-                    blob_file = (
+                    if i == 0:
+                        self._save_image(
+                            self.output_dir
+                            / "blobs"
+                            / create_timestamped_filename(timestamp, ".jpg"),
+                            frame,
+                        )
+                    blob_img = cv.normalize(blob, None, 255, 0, cv.NORM_MINMAX)
+                    self._save_image(
                         self.output_dir
                         / "blobs"
                         / create_timestamped_filename(
                             timestamp, f"_{i}_{blob.class_id}.jpg"
-                        )
+                        ),
+                        blob_img,
                     )
-                    if not blob_file.exists():
-                        blob_file.parent.mkdir(parents=True, exist_ok=True)
-                        cv.imwrite(
-                            str(blob_file),
-                            cv.normalize(blob.mask, None, 0, 255, cv.NORM_MINMAX),
-                        )
             return blobs
 
     def reinitialize_bg_model_from_saved_images(self, now=None):
         self.log("Reinitializing background model from saved images...")
         if now is None:
             now = time.time()
-        for t, f in get_all_timestamped_files_sorted(self.output_dir, glob="**/*.jpg"):
+        for t, f in get_all_timestamped_files_sorted(self.output_dir, glob="20*/**/*.jpg"):
             if 0 < (now - t) < self.history_seconds:
                 frame = cv.imread(str(f))
                 if frame is not None:

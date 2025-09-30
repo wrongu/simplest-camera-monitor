@@ -2,3 +2,4 @@
 black
 matplotlib
 opencv-contrib-python
+yaml

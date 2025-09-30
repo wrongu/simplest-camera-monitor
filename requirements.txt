@@ -1,4 +1,5 @@
 numpy
+onvif_zeep
 opencv-contrib-python-headless
 requests
 scikit-learn

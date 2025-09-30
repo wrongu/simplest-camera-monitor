@@ -2,12 +2,10 @@ import time
 from enum import Enum
 
 import appdaemon.plugins.hass.hassapi as hass
-import cv2 as cv
-import numpy as np
-import requests
 
-from background_model import ForegroundBlob
+from background_model import ForegroundBlob, TimestampAwareBackgroundSubtractor
 from camera_monitor import CameraMonitor
+from cameras import ESPHomeCameraWrapper, ONVIFCameraWrapper
 from image_loader import ensure_files_timestamp_named, get_all_timestamped_files_sorted
 
 ONE_DAY_SECONDS = 24 * 60 * 60
@@ -21,62 +19,33 @@ class State(Enum):
     REBOOT = 3
 
 
-class ESPHomeCameraWrapper(object):
-    def __init__(self, url: str):
-        self.url = url
-        self.last_frame = None
-        self.last_frame_time = 0
-        # TODO - consider using the event stream API and keeping a persistent app:camera http connection open
-        self.components = {"switch/reboot": None, "switch/flash": None}
-        self.poll_components()
-
-    def get_frame(self) -> cv.Mat:
-        resp = requests.get(self.url, timeout=10)
-        if resp.status_code == 200:
-            image_array = np.asarray(bytearray(resp.content), dtype=np.uint8)
-            frame = cv.imdecode(image_array, cv.IMREAD_COLOR)
-            self.last_frame = frame
-            self.last_frame_time = time.time()
-            return frame
-        else:
-            raise ConnectionError(f"Failed to get frame: {resp.status_code}")
-
-    def get_last_frame(self) -> cv.Mat:
-        if self.last_frame is not None and (time.time() - self.last_frame_time) < 5:
-            return self.last_frame
-        else:
-            return self.get_frame()
-
-    def poll_components(self) -> None:
-        for comp in self.components.keys():
-            try:
-                resp = requests.get(self.url + f"/{comp}/", timeout=2)
-                if resp.status_code == 200:
-                    self.components[comp] = resp.json()
-                else:
-                    self.components[comp] = None
-            except requests.exceptions.RequestException:
-                self.components[comp] = None
-
-    def reboot(self) -> bool:
-        if self.components.get("switch/reboot") is not None:
-            try:
-                resp = requests.post(self.url + "/switch/reboot/turn_on", timeout=5)
-                return resp.status_code == 200
-            except Exception as e:
-                print(f"Failed to send reboot request: {e}")
-                return False
-        else:
-            return False
-
-
 class CameraMonitorApp(hass.Hass):
     def initialize(self):
         self.monitor = CameraMonitor(
-            **self.args, log=self.log, output_dir=self.args["output_dir"]
+            brightness_threshold=self.args["brightness_threshold"],
+            history_seconds=self.args["history_seconds"],
+            bg_model=TimestampAwareBackgroundSubtractor(
+                history_seconds=self.args["history_seconds"],
+                var_threshold=self.args["var_threshold"],
+                detect_shadows=self.args["detect_shadows"],
+                area_threshold=self.args["area_threshold"],
+                shadow_correlation_threshold=self.args["shadow_correlation_threshold"],
+                kernel_cleanup=self.args["kernel_cleanup"],
+                kernel_close=self.args["kernel_close"],
+                default_fps=1 / self.args["poll_frequency"],
+            ),
+            model_file=self.args["model_file"],
+            output_dir=self.args["output_dir"],
+            log=self.log,
         )
 
-        self.camera = ESPHomeCameraWrapper(self.args["url"])
+        self.camera = ONVIFCameraWrapper(
+            self.args["url"],
+            self.args["port"],
+            self.args["username"],
+            self.args["password"],
+            resolution=tuple(self.args["resolution"]),
+        )
 
         self.log(f"Loaded model with labels: {self.monitor.label_lookup}")
 
@@ -162,14 +131,23 @@ class CameraMonitorApp(hass.Hass):
 
     def maybe_cleanup(self):
         now = time.time()
-        if now - self._last_cleanup_time > ONE_DAY_SECONDS:
+        if now - self._last_cleanup_time > ONE_DAY_SECONDS / 3:
+            self._last_cleanup_time = now
+
+            # Check that all logged filenames are appropriately timestamped
             ensure_files_timestamp_named(
-                self.output_dir, dry_run=False, glob="**/*.jpg"
+                self.monitor.output_dir, dry_run=False, glob="**/*.jpg"
             )
 
+            # Delete images that are older than 24h and detected blobs that are older than 72h
             for t, f in get_all_timestamped_files_sorted(
-                self.output_dir, glob="**/*.jpg"
+                self.monitor.output_dir, glob="20*/**/*.jpg"
+            ):
+                if now - t > ONE_DAY_SECONDS:
+                    f.unlink()
+
+            for t, f in get_all_timestamped_files_sorted(
+                self.monitor.output_dir, glob="blobs/**/*.jpg"
             ):
                 if now - t > 3 * ONE_DAY_SECONDS:
                     f.unlink()
-            self._last_cleanup_time = now
