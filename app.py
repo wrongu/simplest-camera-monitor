@@ -21,6 +21,8 @@ class State(Enum):
 
 class CameraMonitorApp(hass.Hass):
     def initialize(self):
+        self.save_blobs = self.args.get("save_blobs", True)
+
         self.monitor = CameraMonitor(
             brightness_threshold=self.args["brightness_threshold"],
             history_seconds=self.args["history_seconds"],
@@ -59,8 +61,7 @@ class CameraMonitorApp(hass.Hass):
         self.state_transition(State.RUNNING, since=time.time())
 
         self.run_every(self.poll, interval=self.args["poll_frequency"])
-
-        self._last_cleanup_time = float("-inf")
+        self.run_every(self.cleanup_files, interval=ONE_DAY_SECONDS / 6)
 
     def state_transition(self, new_state: State, **meta):
         old_state = self.state_machine
@@ -78,7 +79,10 @@ class CameraMonitorApp(hass.Hass):
                 frame = self.camera.get_frame()
                 if frame is not None:
                     foreground_objects = self.monitor.process_frame(
-                        frame, timestamp=time.time(), detect_stuff=True
+                        frame,
+                        timestamp=time.time(),
+                        detect_stuff=True,
+                        save_blobs=self.save_blobs,
                     )
                     self.handle_detections(foreground_objects)
             except ConnectionError:
@@ -90,7 +94,7 @@ class CameraMonitorApp(hass.Hass):
                 try:
                     frame = self.camera.get_frame()
                     self.state_transition(State.RUNNING, since=time.time())
-                    self.process_frame(frame)
+                    self.monitor.process_frame(frame)
                 except ConnectionError:
                     pass
             # After a minute, try sending a reboot signal to the camera
@@ -109,14 +113,12 @@ class CameraMonitorApp(hass.Hass):
                 try:
                     frame = self.camera.get_frame()
                     self.state_transition(State.RUNNING, since=time.time())
-                    self.process_frame(frame)
+                    self.monitor.process_frame(frame)
                 except ConnectionError:
                     self.log(
                         "Still cannot connect after reboot attempt", level="WARNING"
                     )
                     self.state_transition(State.CRASHED, since=time.time())
-
-        self.maybe_cleanup()
 
     def handle_detections(self, detected_things: list[ForegroundBlob]):
         if detected_things:
@@ -129,25 +131,23 @@ class CameraMonitorApp(hass.Hass):
                 self.log(f"DEACTIVATED {self.trigger_class}", level="INFO")
                 self.sensor.set_state("off")
 
-    def maybe_cleanup(self):
+    def cleanup_files(self):
         now = time.time()
-        if now - self._last_cleanup_time > ONE_DAY_SECONDS / 3:
-            self._last_cleanup_time = now
 
-            # Check that all logged filenames are appropriately timestamped
-            ensure_files_timestamp_named(
-                self.monitor.output_dir, dry_run=False, glob="**/*.jpg"
-            )
+        # Check that all logged filenames are appropriately timestamped
+        ensure_files_timestamp_named(
+            self.monitor.output_dir, dry_run=False, glob="**/*.jpg"
+        )
 
-            # Delete images that are older than 24h and detected blobs that are older than 72h
-            for t, f in get_all_timestamped_files_sorted(
-                self.monitor.output_dir, glob="20*/**/*.jpg"
-            ):
-                if now - t > ONE_DAY_SECONDS:
-                    f.unlink()
+        # Delete images that are older than 24h and detected blobs that are older than 72h
+        for t, f in get_all_timestamped_files_sorted(
+            self.monitor.output_dir, glob="20*/**/*.jpg"
+        ):
+            if now - t > ONE_DAY_SECONDS:
+                f.unlink()
 
-            for t, f in get_all_timestamped_files_sorted(
-                self.monitor.output_dir, glob="blobs/**/*.jpg"
-            ):
-                if now - t > 3 * ONE_DAY_SECONDS:
-                    f.unlink()
+        for t, f in get_all_timestamped_files_sorted(
+            self.monitor.output_dir, glob="blobs/**/*.jpg"
+        ):
+            if now - t > 3 * ONE_DAY_SECONDS:
+                f.unlink()

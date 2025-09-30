@@ -52,7 +52,7 @@ class CameraMonitor(object):
         cv.imwrite(str(path), image)
 
     def process_frame(
-        self, frame: cv.Mat, timestamp: float, detect_stuff=True
+        self, frame: cv.Mat, timestamp: float, detect_stuff=True, save_blobs=True
     ) -> list[ForegroundBlob]:
         if timestamp is None:
             timestamp = time.time()
@@ -81,7 +81,7 @@ class CameraMonitor(object):
                     blob.class_id = self.label_lookup.get(pred_class_int, "unknown")
 
                 # Debugging: write out some images containing blob info
-                if self.output_dir is not None:
+                if save_blobs and self.output_dir is not None:
                     if i == 0:
                         self._save_image(
                             self.output_dir
