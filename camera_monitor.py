@@ -89,7 +89,7 @@ class CameraMonitor(object):
                             / create_timestamped_filename(timestamp, ".jpg"),
                             frame,
                         )
-                    blob_img = cv.normalize(blob, None, 255, 0, cv.NORM_MINMAX)
+                    blob_img = cv.normalize(blob.mask, None, 255, 0, cv.NORM_MINMAX)
                     self._save_image(
                         self.output_dir
                         / "blobs"
