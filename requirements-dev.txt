@@ -2,4 +2,6 @@
 black
 matplotlib
 opencv-contrib-python
+pandas
+tqdm
 yaml
