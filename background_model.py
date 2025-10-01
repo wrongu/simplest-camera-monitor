@@ -17,6 +17,12 @@ class ForegroundBlob:
     class_id: Optional[str] = None
 
 
+def _is_night_mode_image(img: cv.Mat, grayness_threshold: float = 20) -> bool:
+    grayified = cv.cvtColor(cv.cvtColor(img, cv.COLOR_BGR2GRAY), cv.COLOR_GRAY2BGR)
+    diff = cv.absdiff(img, grayified)
+    return np.mean(diff) < grayness_threshold
+
+
 class TimestampAwareBackgroundSubtractor(object):
     def __init__(
         self,
@@ -28,6 +34,7 @@ class TimestampAwareBackgroundSubtractor(object):
         kernel_cleanup: int = 5,
         kernel_close: int = 11,
         default_fps: float = 0.1,
+        reset_on_night_mode: bool = True,
     ):
         # Parameters for the OpenCV background model
         self._history_seconds = history_seconds
@@ -45,6 +52,9 @@ class TimestampAwareBackgroundSubtractor(object):
         self.kernel_close = cv.getStructuringElement(
             cv.MORPH_ELLIPSE, (kernel_close, kernel_close)
         )
+
+        self.night_mode = False
+        self.reset_on_night_mode = reset_on_night_mode
 
         self.model = None
         self.instantiate_model()
@@ -90,6 +100,13 @@ class TimestampAwareBackgroundSubtractor(object):
                 f"Images must be given in chronological order but "
                 f"last timestamp is {self.last_timestamp} and new timestamp is {t}."
             )
+
+        # Check for night mode changes
+        is_night_mode = _is_night_mode_image(img)
+        if is_night_mode != self.night_mode:
+            self.night_mode = is_night_mode
+            if self.reset_on_night_mode:
+                self.reset()
 
         # Remove all old images from the history
         while self._recents and self._recents[0][0] < t - self._history_seconds:
@@ -148,7 +165,7 @@ class TimestampAwareBackgroundSubtractor(object):
                     image=img,
                     area=stats[i, cv.CC_STAT_AREA],
                     bbox=stats[i, :4],  # x, y, width, height
-                    mask=np.array(labels == i).astype(np.uint8) * clean_mask
+                    mask=np.array(labels == i).astype(np.uint8) * clean_mask,
                 )
             )
 
