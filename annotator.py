@@ -50,10 +50,11 @@ def main():
         for time_and_file in images
         if str(time_and_file[1].relative_to(image_dir)) not in annotations
     )
-    model = TimestampAwareBackgroundSubtractor()
+    model = TimestampAwareBackgroundSubtractor(area_threshold=50 * 50)
 
     cv.namedWindow("Annotator", cv.WINDOW_AUTOSIZE)
 
+    pprint(labels)
     for timestamp, filename in images:
         key = str(filename.relative_to(image_dir))
         if key in annotations and isinstance(annotations[key], list):
@@ -76,23 +77,22 @@ def main():
             x, y, w, h = blob.bbox
             cv.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv.imshow("Annotator", display)
-            while True:
-                pprint(labels)
-                k = cv.waitKey(0)
-                if k == ord("q"):
-                    save_annotations(ann_path, annotations)
-                    cv.destroyAllWindows()
-                    print(f"Annotations saved to {ann_path}")
-                    sys.exit(0)
-                elif ord("0") <= k <= ord("9"):
-                    label_id = chr(k)
-                    if label_id not in labels:
-                        cv.destroyWindow("Annotator")
-                        label_name = prompt_label_name(label_id)
-                        labels[label_id] = label_name
-                    blob_infos.append({"bbox": blob.bbox.tolist(), "label": label_id})
-                    break
-                # ignore other keys
+            k = cv.waitKey(0)
+            if k == ord("q"):
+                save_annotations(ann_path, annotations)
+                cv.destroyAllWindows()
+                print(f"Annotations saved to {ann_path}")
+                sys.exit(0)
+            elif ord("0") <= k <= ord("9"):
+                label_id = chr(k)
+                if label_id not in labels:
+                    cv.destroyWindow("Annotator")
+                    label_name = prompt_label_name(label_id)
+                    labels[label_id] = label_name
+                    pprint(labels)
+                blob_infos.append({"bbox": blob.bbox.tolist(), "label": label_id})
+            elif k == 27:  # ESC to skip this one
+                continue
         annotations[key] = blob_infos
         save_annotations(ann_path, annotations)  # save progress
 
