@@ -4,19 +4,55 @@ from pathlib import Path
 from typing import Optional
 
 import cv2 as cv
+import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.metrics import classification_report
+from sklearn.feature_selection import SelectKBest
+from sklearn.metrics import ConfusionMatrixDisplay, classification_report
 from sklearn.model_selection import train_test_split
-from sklearn.naive_bayes import GaussianNB
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeClassifier
 
 from background_model import ForegroundBlob, _is_night_mode_image
+
+FEATURE_NAMES = [
+    "day_night",
+    "m00",
+    "m10",
+    "m01",
+    "m20",
+    "m11",
+    "m02",
+    "m30",
+    "m21",
+    "m12",
+    "m03",
+    "mu20",
+    "mu11",
+    "mu02",
+    "mu30",
+    "mu2",
+    "mu1",
+    "mu03",
+    "nu20",
+    "nu11",
+    "nu02",
+    "nu30",
+    "nu21",
+    "nu12",
+    "nu03",
+    "x",
+    "y",
+    "w",
+    "h",
+]
 
 
 def featurize(blob: ForegroundBlob) -> np.ndarray:
     moments = cv.moments(blob.mask)
     bbox = blob.bbox
     is_night = 1 if _is_night_mode_image(blob.image) else 0
-    return np.array([is_night, *moments.values, *bbox])
+    return np.array([is_night, *moments.values(), *bbox])
 
 
 def _sanity_check_labels(annotations: dict):
@@ -71,22 +107,25 @@ def load_annotations_as_data(
         if key == "labels":
             continue
         for ann in annots:
-            try:
+            if ann.get("features", []):
                 features.append(ann["features"])
                 labels.append(label_handler(ann["label"]))
                 files.append(key)
                 bboxes.append(ann["bbox"])
                 n_loaded += 1
-            except KeyError:
-                n_skipped += 1
-                continue
     features = np.array(features)
     labels = np.array(labels)
     return features, labels, files, bboxes, label_lookup
 
 
-def train(X_train, y_train, rebalance: bool) -> GaussianNB:
-    clf = GaussianNB()
+def train(X_train, y_train, rebalance: bool) -> Pipeline:
+    clf = Pipeline(
+        [
+            ("pick features", SelectKBest(k=8)),
+            ("zscore", StandardScaler()),
+            ("classifier", DecisionTreeClassifier()),
+        ]
+    )
     if rebalance:
         class_counts = np.bincount(y_train)
         n_0 = class_counts[0]
@@ -94,7 +133,7 @@ def train(X_train, y_train, rebalance: bool) -> GaussianNB:
     else:
         weight = np.ones((len(y_train),), dtype=float)
 
-    clf.fit(X_train, y_train, sample_weight=weight)
+    clf.fit(X_train, y_train, classifier__sample_weight=weight)
     return clf
 
 
@@ -102,7 +141,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Train a Gaussian Naive Bayes classifier to detect deer in images based on blob features."
+        description="Train a Decision Tree classifier to classify based on blob features."
     )
     parser.add_argument(
         "--annot_file",
@@ -161,70 +200,60 @@ if __name__ == "__main__":
         )
     )
 
-    print("Training balance:", sum(y_train == 1), "/", len(y_train))
-    print("Testing balance:", sum(y_test == 1), "/", len(y_test))
-
-    clf = train(X_train, y_train, args.rebalance)
+    model = train(X_train, y_train, args.rebalance)
 
     if args.model_file is not None:
         with open(args.model_file, "wb") as f:
-            pickle.dump({"model": clf, "label_lookup": label_lookup}, f)
+            pickle.dump({"model": model, "label_lookup": label_lookup}, f)
 
     ## Feature visualization with classes ##
 
     if args.visualize:
-        feature_names = ["area", "fg_x", "fg_y", "bg_x", "bg_y"]
-
         import matplotlib.pyplot as plt
 
-        n_features = features.shape[1]
+        selector: SelectKBest = model[0]
+        which_features = selector.get_support(indices=True)
+        n_features = len(which_features)
+        sub_features = features[:, which_features]
 
         # Plotgrid of feature distributions pairwise
-        fig, axes = plt.subplots(n_features, n_features, figsize=(10, 10))
+        fig, axes = plt.subplots(n_features, n_features, figsize=(20, 20))
         for i in range(n_features):
             for j in range(n_features):
                 ax = axes[i, j]
                 if i == j:
-                    vmin = np.min(features[:, i])
-                    vmax = np.max(features[:, j])
+                    vmin = np.min(sub_features[:, i])
+                    vmax = np.max(sub_features[:, j])
                     x = np.linspace(vmin, vmax, 20)
                     for k in range(len(label_lookup)):
                         # Data hists
                         h = ax.hist(
-                            features[labels == k, i],
+                            sub_features[labels == k, i],
                             bins=x,
                             alpha=0.5,
                             label=label_lookup[k],
                             density=True,
                         )
-                        # Fitted Gaussians
-                        mu = clf.theta_[k, i]
-                        sigma = np.sqrt(clf.var_[k, i])
-                        p = np.exp(
-                            -0.5 * ((x - mu) / sigma) ** 2
-                            - 0.5 * np.log(2 * np.pi * sigma**2)
-                        )
-                        ax.plot(x, p, color=h[2][0].get_facecolor(), lw=1)
                     if i == 0:
                         ax.legend()
                 else:
                     for k in range(len(label_lookup)):
                         ax.scatter(
-                            features[labels == k, j],
-                            features[labels == k, i],
+                            sub_features[labels == k, j],
+                            sub_features[labels == k, i],
                             alpha=0.5,
                             label=label_lookup[k],
                             s=1,
                         )
                 if i == n_features - 1:
-                    ax.set_xlabel(feature_names[j])
+                    ax.set_xlabel(FEATURE_NAMES[j])
                 if j == 0:
-                    ax.set_ylabel(feature_names[i])
+                    ax.set_ylabel(FEATURE_NAMES[i])
         plt.tight_layout()
         plt.show()
 
     # Print classification report
-    y_pred = clf.predict(X_test)
+    y_pred = model.predict(X_test)
     print(
         classification_report(
             y_test,
@@ -234,3 +263,15 @@ if __name__ == "__main__":
             ],
         )
     )
+
+    # Confusion matrix
+    disp = ConfusionMatrixDisplay.from_predictions(
+        y_test,
+        y_pred,
+        display_labels=[
+            label_lookup[i] for i in range(len(label_lookup)) if i in set(y_test)
+        ],
+        normalize="true",
+    )
+    disp.figure_.suptitle("Confusion Matrix")
+    plt.show()
