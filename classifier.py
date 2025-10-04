@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Optional
 
 import cv2 as cv
-import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.feature_selection import SelectKBest
 from sklearn.metrics import ConfusionMatrixDisplay, classification_report
@@ -264,14 +263,15 @@ if __name__ == "__main__":
         )
     )
 
-    # Confusion matrix
-    disp = ConfusionMatrixDisplay.from_predictions(
-        y_test,
-        y_pred,
-        display_labels=[
-            label_lookup[i] for i in range(len(label_lookup)) if i in set(y_test)
-        ],
-        normalize="true",
-    )
-    disp.figure_.suptitle("Confusion Matrix")
-    plt.show()
+    if args.visualize:
+        # Confusion matrix
+        disp = ConfusionMatrixDisplay.from_predictions(
+            y_test,
+            y_pred,
+            display_labels=[
+                label_lookup[i] for i in range(len(label_lookup)) if i in set(y_test)
+            ],
+            normalize="true",
+        )
+        disp.figure_.suptitle("Confusion Matrix")
+        plt.show()
