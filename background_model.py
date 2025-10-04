@@ -17,9 +17,9 @@ class ForegroundBlob:
     class_id: Optional[str] = None
 
 
-def _is_night_mode_image(img: cv.Mat, grayness_threshold: float = 20) -> bool:
+def _is_night_mode_image(img: cv.Mat, grayness_threshold: float = 0.01) -> bool:
     grayified = cv.cvtColor(cv.cvtColor(img, cv.COLOR_BGR2GRAY), cv.COLOR_GRAY2BGR)
-    diff = cv.absdiff(img, grayified)
+    diff = np.abs(grayified / 255 - img / 255)
     return np.mean(diff) < grayness_threshold
 
 

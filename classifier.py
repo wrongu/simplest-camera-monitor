@@ -3,38 +3,20 @@ import pickle
 from pathlib import Path
 from typing import Optional
 
+import cv2 as cv
 import numpy as np
 from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import GaussianNB
 
-from background_model import ForegroundBlob
-
-
-def bgr_to_xy(b, g, r):
-    """Convert float BGR color to CIE 1931 xy chromaticity."""
-
-    # Convert RGB to XYZ
-    X = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
-    Y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
-    Z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
-
-    # Convert XYZ to xy
-    if (X + Y + Z) == 0:
-        return (0.0, 0.0)
-
-    return X / (X + Y + Z), Y / (X + Y + Z)
+from background_model import ForegroundBlob, _is_night_mode_image
 
 
 def featurize(blob: ForegroundBlob) -> np.ndarray:
-    # moments = cv.moments(blob.mask)
-    fg_bgr = np.median(blob.image[blob.mask > 0, :], axis=0)
-    bg_bgr = np.median(blob.background[blob.mask > 0, :], axis=0)
-    fg_xy = np.array(bgr_to_xy(*fg_bgr))
-    bg_xy = np.array(bgr_to_xy(*bg_bgr))
-    color_features = [*fg_xy, *bg_xy]
-    # return blob["moments"] + [blob["area"]] + color_features
-    return np.array([np.log1p(blob.area)] + color_features).reshape(1, -1)
+    moments = cv.moments(blob.mask)
+    bbox = blob.bbox
+    is_night = 1 if _is_night_mode_image(blob.image) else 0
+    return np.array([is_night, *moments.values, *bbox])
 
 
 def _sanity_check_labels(annotations: dict):
@@ -85,20 +67,15 @@ def load_annotations_as_data(
 
     features, labels, files, bboxes = [], [], [], []
     n_loaded, n_skipped = 0, 0
-    for key, blobs in annotations.items():
+    for key, annots in annotations.items():
         if key == "labels":
             continue
-        for blob in blobs:
+        for ann in annots:
             try:
-                fg_xy = np.array(bgr_to_xy(*blob["fg_bgr"]))
-                bg_xy = np.array(bgr_to_xy(*blob["bg_bgr"]))
-                color_features = [*fg_xy, *bg_xy]
-                # feat = blob["moments"] + [blob["area"]] + color_features
-                feat = [np.log(blob["area"])] + color_features
-                features.append(feat)
-                labels.append(label_handler(blob["label"]))
+                features.append(ann["features"])
+                labels.append(label_handler(ann["label"]))
                 files.append(key)
-                bboxes.append(blob["bounding_box"])
+                bboxes.append(ann["bbox"])
                 n_loaded += 1
             except KeyError:
                 n_skipped += 1
@@ -142,7 +119,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_file",
         type=Path,
-        default="deer_classifier.pkl",
+        default="classifier.pkl",
         help="Path to save the trained model.",
     )
     parser.add_argument(
