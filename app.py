@@ -132,6 +132,7 @@ class CameraMonitorApp(hass.Hass):
                 self.sensor.set_state("off")
 
     def cleanup_files(self):
+        self.log("Starting cleanup")
         now = time.time()
 
         # Check that all logged filenames are appropriately timestamped
@@ -140,14 +141,20 @@ class CameraMonitorApp(hass.Hass):
         )
 
         # Delete images that are older than 24h and detected blobs that are older than 72h
+        n_images_deleted = 0
         for t, f in get_all_timestamped_files_sorted(
             self.monitor.output_dir, glob="20*/**/*.jpg"
         ):
             if now - t > ONE_DAY_SECONDS:
                 f.unlink()
+                n_images_deleted += 1
+        self.log(f"Deleted {n_images_deleted} old images")
 
+        n_blobs_deleted = 0
         for t, f in get_all_timestamped_files_sorted(
             self.monitor.output_dir, glob="blobs/**/*.jpg"
         ):
             if now - t > 3 * ONE_DAY_SECONDS:
                 f.unlink()
+                n_blobs_deleted += 1
+        self.log(f"Deleted {n_blobs_deleted} old blobs files")
