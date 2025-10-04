@@ -60,6 +60,7 @@ class CameraMonitorApp(hass.Hass):
         self.state_meta = None
         self.state_transition(State.RUNNING, since=time.time())
 
+        self.cleanup_files()
         self.run_every(self.poll, interval=self.args["poll_frequency"])
         self.run_every(self.cleanup_files, interval=ONE_DAY_SECONDS / 6)
 
