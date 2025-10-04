@@ -76,9 +76,13 @@ class CameraMonitor(object):
 
             # classify those buggers
             for i, blob in enumerate(blobs):
+                blob.class_id = "???"  # default to unknown
                 if self.classifier is not None:
-                    pred_class_int = self.classifier.predict(featurize(blob)).item()
-                    blob.class_id = self.label_lookup.get(pred_class_int, "unknown")
+                    try:
+                        pred_class_int = self.classifier.predict(featurize(blob)[None, :]).item()
+                        blob.class_id = self.label_lookup.get(pred_class_int, str(pred_class_int))
+                    except Exception as e:
+                        self.log(f"Classifier error: {e}", level="ERROR")
 
                 # Debugging: write out some images containing blob info
                 if save_blobs and self.output_dir is not None:

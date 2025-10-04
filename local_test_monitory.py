@@ -95,7 +95,7 @@ if __name__ == "__main__":
         history_seconds=300,
         bg_model=bg_model,
         output_dir=args.data_dir,
-        model_file=None,
+        model_file="classifier.pkl",
     )
 
     if args.live:
@@ -106,7 +106,7 @@ if __name__ == "__main__":
             password=secrets["password"],
             resolution=tuple(secrets["resolution"]),
         )
-        run_with_live_camera(camera, monitor, 2)
+        run_with_live_camera(camera, monitor, 5)
 
     if args.log:
         rerun_with_logged_images(monitor, args.data_dir)
