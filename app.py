@@ -74,7 +74,7 @@ class CameraMonitorApp(hass.Hass):
             if new_state in (State.CANT_CONNECT, State.CRASHED, State.REBOOT):
                 self.sensor.set_state("unavailable")
 
-    def poll(self, **kwargs):
+    def poll(self, *args, **kwargs):
         if self.state_machine == State.RUNNING:
             try:
                 frame = self.camera.get_frame()
@@ -132,7 +132,7 @@ class CameraMonitorApp(hass.Hass):
                 self.log(f"DEACTIVATED {self.trigger_class}", level="INFO")
                 self.sensor.set_state("off")
 
-    def cleanup_files(self):
+    def cleanup_files(self, *args, **kwargs):
         self.log("Starting cleanup")
         now = time.time()
 
