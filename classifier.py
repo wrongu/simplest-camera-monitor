@@ -44,6 +44,7 @@ FEATURE_NAMES = [
     "y",
     "w",
     "h",
+    "shadow_correlation",
 ]
 
 
@@ -51,7 +52,9 @@ def featurize(blob: ForegroundBlob) -> np.ndarray:
     moments = cv.moments(blob.mask)
     bbox = blob.bbox
     is_night = 1 if _is_night_mode_image(blob.image) else 0
-    return np.array([is_night, *moments.values(), *bbox])
+    return np.array(
+        [is_night, *moments.values(), *bbox, np.mean(blob.shadow_correlation())]
+    )
 
 
 def _sanity_check_labels(annotations: dict):

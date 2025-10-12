@@ -44,7 +44,6 @@ def rerun_with_logged_images(
     start_timestamp: float = 0.0,
     end_timestamp: float = float("inf"),
 ):
-    monitor.bg_model.reset()
     for t, f in get_all_timestamped_files_sorted(data_dir):
         human_readable_t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
         print(human_readable_t, "\t", f)
@@ -89,13 +88,28 @@ if __name__ == "__main__":
     with open("secrets.yaml", "r") as f:
         secrets = yaml.safe_load(f)
 
-    bg_model = TimestampAwareBackgroundSubtractor()
+    with open("local_config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+
+    bg_model = TimestampAwareBackgroundSubtractor(
+        history_seconds=config["history_seconds"],
+        var_threshold=config["var_threshold"],
+        detect_shadows=config["detect_shadows"],
+        area_threshold=config["area_threshold"],
+        shadow_correlation_threshold=config["shadow_correlation_threshold"],
+        morph_radius=config["morph_radius"],
+        morph_thresh=config["morph_thresh"],
+        morph_iters=config["morph_iters"],
+        default_fps=config["default_fps"],
+        night_mode_kwargs={k[6:]: v for k, v in config.items() if k.startswith("night_")},
+        debug_dir = Path("debug")
+    )
     monitor = CameraMonitor(
-        brightness_threshold=40,
-        history_seconds=300,
+        brightness_threshold=config["brightness_threshold"],
+        history_seconds=config["history_seconds"],
         bg_model=bg_model,
-        output_dir=args.data_dir,
-        model_file="classifier.pkl",
+        output_dir=args.data_dir if args.live else None,
+        # model_file="classifier.pkl",
     )
 
     if args.live:
