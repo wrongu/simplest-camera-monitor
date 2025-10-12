@@ -8,6 +8,7 @@ from pprint import pprint
 
 import cv2 as cv
 import numpy as np
+import yaml
 
 from background_model import TimestampAwareBackgroundSubtractor, ForegroundBlob
 from classifier import featurize
@@ -76,6 +77,7 @@ def iter_files_with_flags(annotations, image_dir):
 def main():
     parser = argparse.ArgumentParser(description="Image annotation tool")
     parser.add_argument("image_dir", type=Path, help="Directory with images")
+    parser.add_argument("bg_model_config", type=Path, help="Path to background model config")
     args = parser.parse_args()
 
     image_dir = args.image_dir
@@ -83,6 +85,27 @@ def main():
     if not images:
         print("No images found in", image_dir)
         sys.exit(1)
+
+    if not args.bg_model_config.exists():
+        print("Background model config file not found:", args.bg_model_config)
+        sys.exit(1)
+
+    with open(args.bg_model_config, "r") as f:
+        bg_config = yaml.safe_load(f)
+
+    model = TimestampAwareBackgroundSubtractor(
+        history_seconds=bg_config["history_seconds"],
+        var_threshold=bg_config["var_threshold"],
+        detect_shadows=bg_config["detect_shadows"],
+        area_threshold=bg_config["area_threshold"],
+        shadow_correlation_threshold=bg_config["shadow_correlation_threshold"],
+        morph_radius=bg_config["morph_radius"],
+        morph_thresh=bg_config["morph_thresh"],
+        morph_iters=bg_config["morph_iters"],
+        default_fps=bg_config["default_fps"],
+        night_mode_kwargs={k[6:]: v for k, v in bg_config.items() if k.startswith("night_")},
+        debug_dir = Path("debug")
+    )
 
     ann_path = image_dir / ANNOTATION_FILE
     annotations = load_annotations(ann_path)
@@ -95,7 +118,6 @@ def main():
     # an image is processed, we clear recent_skipped. This way, recent_skipped always contains
     # the set of files *since* the last processed file.
     recent_skipped = deque()
-    model = TimestampAwareBackgroundSubtractor(area_threshold=500)
 
     pprint(labels)
     i = 0
