@@ -7,7 +7,7 @@ import cv2 as cv
 import numpy as np
 from sklearn.feature_selection import SelectKBest
 from sklearn.metrics import ConfusionMatrixDisplay, classification_report
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier
@@ -30,8 +30,8 @@ FEATURE_NAMES = [
     "mu11",
     "mu02",
     "mu30",
-    "mu2",
-    "mu1",
+    "mu21",
+    "mu12",
     "mu03",
     "nu20",
     "nu11",
@@ -129,23 +129,165 @@ def load_annotations_as_data(
     return features, labels, files, bboxes, label_lookup
 
 
-def train(X_train, y_train, rebalance: bool, k_features: int = 8) -> Pipeline:
-    clf = Pipeline(
+def new_estimator() -> Pipeline:
+    return Pipeline(
         [
-            ("pick features", SelectKBest(k=k_features)),
             ("zscore", StandardScaler()),
+            ("features", SelectKBest()),
             ("classifier", DecisionTreeClassifier()),
         ]
     )
-    if rebalance:
-        class_counts = np.bincount(y_train)
-        n_0 = class_counts[0]
-        weight = np.array([n_0 / class_counts[y] for y in y_train], dtype=float)
-    else:
-        weight = np.ones((len(y_train),), dtype=float)
 
-    clf.fit(X_train, y_train, classifier__sample_weight=weight)
-    return clf
+
+def get_sample_weights(classes, rebalance):
+    class_counts = np.bincount(classes)
+    n_0 = class_counts[0]
+    equal_weight = np.ones((len(classes),), dtype=float)
+    rebalance_weight = np.array([n_0 / class_counts[y] for y in classes], dtype=float)
+    if isinstance(rebalance, bool) and rebalance:
+        weight = rebalance_weight
+    elif isinstance(rebalance, float) and rebalance > 0:
+        weight = (1 - rebalance) * equal_weight + rebalance * rebalance_weight
+    else:
+        weight = equal_weight
+    return weight
+
+
+def model_selection(x, y, rebalance: bool | float, max_k: int, cv: int = 5) -> Pipeline:
+    cv_model = new_estimator()
+    weight = get_sample_weights(y, rebalance)
+
+    searcher = GridSearchCV(
+        estimator=cv_model,
+        param_grid={"features__k": np.arange(1, max_k + 1)},
+        cv=cv,
+        n_jobs=-1,
+        verbose=1,
+    )
+    searcher.fit(x, y, classifier__sample_weight=weight)
+    print("Score per parameter set:")
+    for params, mean_score, scores in zip(
+        searcher.cv_results_["params"],
+        searcher.cv_results_["mean_test_score"],
+        searcher.cv_results_["std_test_score"],
+    ):
+        print(f"  {params}: {mean_score:.3f} (+/-{scores * 2:.3f})")
+    print("Best parameters from CV:", searcher.best_params_)
+
+    # Update classifier with best params
+    cv_model.set_params(**searcher.best_params_)
+    cv_model.fit(x, y, classifier__sample_weight=weight)
+    return cv_model
+
+
+def main(
+    annot_file: Path,
+    binary_detection: Optional[str],
+    test_fraction: float,
+    seed: int,
+    rebalance: bool | float,
+    k_features: int,
+    model_file: Path,
+    visualize: bool = False,
+):
+    global FEATURE_NAMES
+    features, labels, files, bboxes, label_lookup = load_annotations_as_data(
+        annot_file, binary_detection
+    )
+
+    # Drop raw moments
+    features_to_drop = [
+        "m00",
+        "m10",
+        "m01",
+        "m20",
+        "m11",
+        "m02",
+        "m30",
+        "m21",
+        "m12",
+        "m03",
+    ]
+    drop_indices = [FEATURE_NAMES.index(f) for f in features_to_drop]
+    features = np.delete(features, drop_indices, axis=1)
+    FEATURE_NAMES = [f for i, f in enumerate(FEATURE_NAMES) if i not in drop_indices]
+
+    X_train, X_test, y_train, y_test, files_train, files_test, bb_train, bb_test = (
+        train_test_split(
+            features,
+            labels,
+            files,
+            bboxes,
+            test_size=test_fraction,
+            random_state=seed,
+        )
+    )
+
+    # Cross-validation hyperparameter search
+    model = model_selection(X_train, y_train, rebalance, k_features)
+
+    # Save trained model to disk
+    if model_file is not None:
+        with open(model_file, "wb") as f:
+            pickle.dump({"model": model, "label_lookup": label_lookup}, f)
+
+    ## Feature visualization with classes ##
+    if visualize:
+        import matplotlib.pyplot as plt
+
+        selector: SelectKBest = model[1]
+        which_features = selector.get_support(indices=True)
+        n_features = len(which_features)
+        sub_features = features[:, which_features]
+
+        # Plotgrid of feature distributions pairwise
+        fig, axes = plt.subplots(n_features, n_features, figsize=(20, 20))
+        for i in range(n_features):
+            for j in range(n_features):
+                ax = axes[i, j]
+                if i == j:
+                    vmin = np.min(sub_features[:, i])
+                    vmax = np.max(sub_features[:, j])
+                    x = np.linspace(vmin, vmax, 20)
+                    for k_features in range(len(label_lookup)):
+                        # Data hists
+                        h = ax.hist(
+                            sub_features[labels == k_features, i],
+                            bins=x,
+                            alpha=0.5,
+                            label=label_lookup[k_features],
+                            density=True,
+                        )
+                    if i == 0:
+                        ax.legend()
+                else:
+                    for k_features in range(len(label_lookup)):
+                        ax.scatter(
+                            sub_features[labels == k_features, j],
+                            sub_features[labels == k_features, i],
+                            alpha=0.5,
+                            label=label_lookup[k_features],
+                            s=1,
+                        )
+                if i == n_features - 1:
+                    ax.set_xlabel(FEATURE_NAMES[j])
+                if j == 0:
+                    ax.set_ylabel(FEATURE_NAMES[i])
+        plt.tight_layout()
+        plt.show()
+
+    # Print classification report
+    y_pred = model.predict(X_test)
+    print(classification_report(y_test, y_pred))
+
+    if visualize:
+        # Confusion matrix
+        disp = ConfusionMatrixDisplay.from_predictions(
+            y_test, y_pred, normalize="true"
+        )
+        disp.figure_.suptitle("Confusion Matrix")
+        disp.figure_.tight_layout()
+        plt.show()
 
 
 if __name__ == "__main__":
@@ -161,7 +303,7 @@ if __name__ == "__main__":
         help="Path to the JSON file containing blob annotations.",
     )
     parser.add_argument(
-        "--binary-detection",
+        "--binary_detection",
         type=str,
         default=None,
         help="Optional label to focus on, making a binary classifier (e.g. 'person' vs 'not person')",
@@ -180,11 +322,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--rebalance",
-        action="store_true",
-        help="Rebalance classes during training.",
+        type=float,
+        default=0.0,
+        help="Amount to rebalance classes during training.",
     )
     parser.add_argument(
-        "--k",
+        "--k_features",
         type=int,
         default=8,
         help="Number of features to select.",
@@ -192,7 +335,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=4796487,
         help="Random seed for reproducibility.",
     )
     parser.add_argument(
@@ -202,90 +345,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    features, labels, files, bboxes, label_lookup = load_annotations_as_data(
-        args.annot_file, args.binary_detection
-    )
-
-    X_train, X_test, y_train, y_test, files_train, files_test, bb_train, bb_test = (
-        train_test_split(
-            features,
-            labels,
-            files,
-            bboxes,
-            test_size=args.test_fraction,
-            random_state=args.seed,
-        )
-    )
-
-    model = train(X_train, y_train, args.rebalance, args.k)
-
-    if args.model_file is not None:
-        with open(args.model_file, "wb") as f:
-            pickle.dump({"model": model, "label_lookup": label_lookup}, f)
-
-    ## Feature visualization with classes ##
-
-    if args.visualize:
-        import matplotlib.pyplot as plt
-
-        selector: SelectKBest = model[0]
-        which_features = selector.get_support(indices=True)
-        n_features = len(which_features)
-        sub_features = features[:, which_features]
-
-        # Plotgrid of feature distributions pairwise
-        fig, axes = plt.subplots(n_features, n_features, figsize=(20, 20))
-        for i in range(n_features):
-            for j in range(n_features):
-                ax = axes[i, j]
-                if i == j:
-                    vmin = np.min(sub_features[:, i])
-                    vmax = np.max(sub_features[:, j])
-                    x = np.linspace(vmin, vmax, 20)
-                    for k in range(len(label_lookup)):
-                        # Data hists
-                        h = ax.hist(
-                            sub_features[labels == k, i],
-                            bins=x,
-                            alpha=0.5,
-                            label=label_lookup[k],
-                            density=True,
-                        )
-                    if i == 0:
-                        ax.legend()
-                else:
-                    for k in range(len(label_lookup)):
-                        ax.scatter(
-                            sub_features[labels == k, j],
-                            sub_features[labels == k, i],
-                            alpha=0.5,
-                            label=label_lookup[k],
-                            s=1,
-                        )
-                if i == n_features - 1:
-                    ax.set_xlabel(FEATURE_NAMES[j])
-                if j == 0:
-                    ax.set_ylabel(FEATURE_NAMES[i])
-        plt.tight_layout()
-        plt.show()
-
-    # Print classification report
-    y_pred = model.predict(X_test)
-    print(
-        classification_report(
-            y_test,
-            y_pred,
-            labels=list(label_lookup.values()),
-        )
-    )
-
-    if args.visualize:
-        # Confusion matrix
-        disp = ConfusionMatrixDisplay.from_predictions(
-            y_test,
-            y_pred,
-            labels=list(label_lookup.values()),
-            normalize="true",
-        )
-        disp.figure_.suptitle("Confusion Matrix")
-        plt.show()
+    main(**(vars(args)))
