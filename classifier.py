@@ -45,6 +45,9 @@ FEATURE_NAMES = [
     "w",
     "h",
     "shadow_correlation",
+    "b",
+    "g",
+    "r",
 ]
 
 
@@ -53,7 +56,13 @@ def featurize(blob: ForegroundBlob) -> np.ndarray:
     bbox = blob.bbox
     is_night = 1 if _is_night_mode_image(blob.image) else 0
     return np.array(
-        [is_night, *moments.values(), *bbox, np.mean(blob.shadow_correlation())]
+        [
+            is_night,
+            *moments.values(),
+            *bbox,
+            np.mean(blob.shadow_correlation()),
+            *np.median(blob.image[blob.mask > 0], axis=0),
+        ]
     )
 
 

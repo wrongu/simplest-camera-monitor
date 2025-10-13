@@ -11,7 +11,7 @@ import numpy as np
 import yaml
 
 from background_model import TimestampAwareBackgroundSubtractor, ForegroundBlob
-from classifier import featurize
+from classifier import featurize, FEATURE_NAMES
 from image_loader import get_all_timestamped_files_sorted
 
 ANNOTATION_FILE = "annotations.json"
@@ -34,7 +34,7 @@ def prompt_label_name(label_id):
     return name.strip()
 
 
-def get_annotations(image, blobs, labels_dict):
+def get_annotations(image, blobs, labels_dict, prior_annots):
     if len(blobs) == 0:
         cv.imshow("Annotator", image)
         cv.waitKey(1)
@@ -42,6 +42,23 @@ def get_annotations(image, blobs, labels_dict):
 
     blob_infos = []
     for blob in blobs:
+        # Check if this blob matches any prior annotation (by IoU)
+        matched_prior = None
+        best_iou = 0.0
+        for prior in prior_annots:
+            iou = ForegroundBlob.iou(np.array(prior["bbox"]), blob.bbox)
+            if iou > best_iou:
+                best_iou = iou
+                matched_prior = prior
+        if matched_prior is not None and best_iou > 0.5:
+            blob_infos.append(
+                {"bbox": blob.bbox.tolist(), "label": matched_prior["label"]}
+            )
+            continue
+        elif matched_prior is not None:
+            print(f"NEAREST [IOU={best_iou:.2f}]", matched_prior)
+
+
         display = image.copy()
         x, y, w, h = blob.bbox
         cv.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -70,14 +87,26 @@ def iter_files_with_flags(annotations, image_dir):
         )
         needs_features = needs_annotation
         if not needs_annotation and len(annotations[key]) > 0:
-            needs_features = any("features" not in info for info in annotations[key])
+            for info in annotations[key]:
+                if "features" not in info or len(info["features"]) != len(FEATURE_NAMES):
+                    needs_features = True
+                    break
+
         yield timestamp, filename, needs_annotation, needs_features
 
 
 def main():
     parser = argparse.ArgumentParser(description="Image annotation tool")
     parser.add_argument("image_dir", type=Path, help="Directory with images")
-    parser.add_argument("bg_model_config", type=Path, help="Path to background model config")
+    parser.add_argument(
+        "bg_model_config", type=Path, help="Path to background model config"
+    )
+    parser.add_argument(
+        "--prior-annotations",
+        default=None,
+        type=Path,
+        help="Path to existing annotations to default to",
+    )
     args = parser.parse_args()
 
     image_dir = args.image_dir
@@ -85,6 +114,14 @@ def main():
     if not images:
         print("No images found in", image_dir)
         sys.exit(1)
+
+    prior_annotations = {}
+    if args.prior_annotations is not None:
+        if not args.prior_annotations.exists():
+            print("Prior annotations file not found:", args.prior_annotations)
+            sys.exit(1)
+        with open(args.prior_annotations, "r") as f:
+            prior_annotations = json.load(f)
 
     if not args.bg_model_config.exists():
         print("Background model config file not found:", args.bg_model_config)
@@ -103,8 +140,10 @@ def main():
         morph_thresh=bg_config["morph_thresh"],
         morph_iters=bg_config["morph_iters"],
         default_fps=bg_config["default_fps"],
-        night_mode_kwargs={k[6:]: v for k, v in bg_config.items() if k.startswith("night_")},
-        debug_dir = Path("debug")
+        night_mode_kwargs={
+            k[6:]: v for k, v in bg_config.items() if k.startswith("night_")
+        },
+        # debug_dir=Path("debug"),
     )
 
     ann_path = image_dir / ANNOTATION_FILE
@@ -133,7 +172,7 @@ def main():
         while recent_skipped:
             ts, fn = recent_skipped.popleft()
             # If skipped file is part of this file's context, load it to update the model
-            if ts >= timestamp - model._history_seconds:
+            if ts >= timestamp - model.history_seconds:
                 img = cv.imread(str(fn))
                 model.apply(img, ts)
 
@@ -148,8 +187,11 @@ def main():
 
         mask, blobs = model.applyWithStats(img, timestamp)
 
+        # Skip blobs that are almost certainly shadows
+        blobs = [b for b in blobs if np.mean(b.shadow_correlation()) < 0.5]
+
         if needs_annotation:
-            annots = get_annotations(img, blobs, labels)
+            annots = get_annotations(img, blobs, labels, prior_annotations.get(key, []))
             if annots is None:
                 save_annotations(ann_path, annotations)
                 cv.destroyAllWindows()
