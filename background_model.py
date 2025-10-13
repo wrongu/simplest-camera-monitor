@@ -124,7 +124,9 @@ class TimestampAwareBackgroundSubtractor(object):
 
         self.night_mode = False
         self._night_mode_kwargs = night_mode_kwargs or {}
-        self._day_mode_kwargs = {k: self.__dict__[k] for k in self._night_mode_kwargs.keys()}
+        self._day_mode_kwargs = {
+            k: self.__dict__[k] for k in self._night_mode_kwargs.keys()
+        }
 
         self.model = cv.createBackgroundSubtractorMOG2(
             history=int(history_seconds * default_fps),
@@ -137,12 +139,15 @@ class TimestampAwareBackgroundSubtractor(object):
     def setArgs(self, **kwargs):
         for k, v in kwargs.items():
             match k:
-                case "var_threshold":
-                    self.var_threshold = v
-                    self.model.setVarThreshold(v)
-                case "detect_shadows":
-                    self.detect_shadows = v
-                    self.model.setDetectShadows(v)
+                case "var_threshold" | "detect_shadows" | "history_seconds":
+                    if self.__dict__[k] != v:
+                        setattr(self, k, v)
+                    # If model params are updated, we need to re-instantiate the model itself
+                    self.model = cv.createBackgroundSubtractorMOG2(
+                        history=int(self.history_seconds * self.fps),
+                        varThreshold=self.var_threshold,
+                        detectShadows=self.detect_shadows,
+                    )
                 case "area_threshold":
                     self.area_threshold = v
                 case "shadow_correlation_threshold":
@@ -156,9 +161,6 @@ class TimestampAwareBackgroundSubtractor(object):
                 case "default_fps":
                     self.default_fps = float(v)
                     self.update_fps(delta_t=1.0 / self.default_fps, ema_alpha=1.0)
-                case "history_seconds":
-                    self.history_seconds = float(v)
-                    self.model.setHistory(int(self.history_seconds * self.fps))
 
     def update_fps(self, delta_t: float, ema_alpha: float = 0.1):
         # Exponential moving average, or reset to default if delta_t is very large
