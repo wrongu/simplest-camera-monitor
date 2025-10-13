@@ -162,7 +162,10 @@ def model_selection(x, y, rebalance: bool | float, max_k: int, cv: int = 5) -> P
 
     searcher = GridSearchCV(
         estimator=cv_model,
-        param_grid={"features__k": np.arange(1, max_k + 1)},
+        param_grid={
+            "features__k": np.arange(1, max_k + 1),
+            "classifier__max_depth": [3, 5, 10, 15, 20, None],
+        },
         cv=cv,
         n_jobs=-1,
         verbose=1,
