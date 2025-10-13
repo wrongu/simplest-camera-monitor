@@ -101,8 +101,11 @@ if __name__ == "__main__":
         morph_thresh=config["morph_thresh"],
         morph_iters=config["morph_iters"],
         default_fps=config["default_fps"],
-        night_mode_kwargs={k[6:]: v for k, v in config.items() if k.startswith("night_")},
-        debug_dir = Path("debug")
+        night_mode_kwargs={
+            k[6:]: v for k, v in config.items() if k.startswith("night_")
+        },
+        region_of_interest=cv.imread(config["region_of_interest"], cv.IMREAD_GRAYSCALE),
+        debug_dir=Path("debug"),
     )
     monitor = CameraMonitor(
         brightness_threshold=config["brightness_threshold"],

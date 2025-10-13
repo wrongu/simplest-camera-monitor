@@ -101,6 +101,7 @@ class TimestampAwareBackgroundSubtractor(object):
         morph_thresh: float = 0.3,
         morph_iters: int = 3,
         default_fps: float = 0.1,
+        region_of_interest: Optional[cv.Mat] = None,
         night_mode_kwargs: Optional[dict] = None,
         debug_dir: Optional[Path] = None,
     ):
@@ -133,6 +134,10 @@ class TimestampAwareBackgroundSubtractor(object):
             varThreshold=self.var_threshold,
             detectShadows=self.detect_shadows,
         )
+
+        self.roi = region_of_interest
+        if self.roi is not None:
+            self.roi = self.roi / max(1.0, np.max(self.roi))
 
         self.debug_dir = debug_dir
 
@@ -226,9 +231,10 @@ class TimestampAwareBackgroundSubtractor(object):
             if stats[i, cv.CC_STAT_AREA] < self.area_threshold:
                 continue
 
-            # Do a quick brightness scaling check to see if this is likely just a sunlight/shadow change
-            background_blob = background[labels == i, :]
-            current_blob = img[labels == i, :]
+            if self.roi is not None:
+                pixels_in_roi = np.sum(self.roi[labels == i])
+                if pixels_in_roi / stats[i, cv.CC_STAT_AREA] < 0.5:
+                    continue
 
             # Append this foreground blob info to the list; note that each blob shares the same
             # background and image object references but has a different mask

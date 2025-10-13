@@ -2,10 +2,11 @@ import time
 from enum import Enum
 
 import appdaemon.plugins.hass.hassapi as hass
+import cv2 as cv
 
 from background_model import ForegroundBlob, TimestampAwareBackgroundSubtractor
 from camera_monitor import CameraMonitor
-from cameras import ESPHomeCameraWrapper, ONVIFCameraWrapper
+from cameras import ONVIFCameraWrapper
 from image_loader import ensure_files_timestamp_named, get_all_timestamped_files_sorted
 
 ONE_DAY_SECONDS = 24 * 60 * 60
@@ -36,6 +37,10 @@ class CameraMonitorApp(hass.Hass):
                 morph_thresh=self.args["morph_thresh"],
                 morph_iters=self.args["morph_iters"],
                 default_fps=1 / self.args["poll_frequency"],
+                region_of_interest=cv.imread(self.args["region_of_interest"], cv.IMREAD_GRAYSCALE),
+                night_mode_kwargs={
+                    k[6:]: v for k, v in self.args.items() if k.startswith("night_")
+                },
             ),
             model_file=self.args["model_file"],
             output_dir=self.args["output_dir"],

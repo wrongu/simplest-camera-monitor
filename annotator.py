@@ -140,6 +140,7 @@ def main():
         morph_thresh=bg_config["morph_thresh"],
         morph_iters=bg_config["morph_iters"],
         default_fps=bg_config["default_fps"],
+        region_of_interest=cv.imread(bg_config["region_of_interest"], cv.IMREAD_GRAYSCALE),
         night_mode_kwargs={
             k[6:]: v for k, v in bg_config.items() if k.startswith("night_")
         },
