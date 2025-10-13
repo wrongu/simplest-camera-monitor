@@ -129,10 +129,10 @@ def load_annotations_as_data(
     return features, labels, files, bboxes, label_lookup
 
 
-def train(X_train, y_train, rebalance: bool) -> Pipeline:
+def train(X_train, y_train, rebalance: bool, k_features: int = 8) -> Pipeline:
     clf = Pipeline(
         [
-            ("pick features", SelectKBest(k=8)),
+            ("pick features", SelectKBest(k=k_features)),
             ("zscore", StandardScaler()),
             ("classifier", DecisionTreeClassifier()),
         ]
@@ -184,6 +184,12 @@ if __name__ == "__main__":
         help="Rebalance classes during training.",
     )
     parser.add_argument(
+        "--k",
+        type=int,
+        default=8,
+        help="Number of features to select.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -211,7 +217,7 @@ if __name__ == "__main__":
         )
     )
 
-    model = train(X_train, y_train, args.rebalance)
+    model = train(X_train, y_train, args.rebalance, args.k)
 
     if args.model_file is not None:
         with open(args.model_file, "wb") as f:
@@ -269,9 +275,7 @@ if __name__ == "__main__":
         classification_report(
             y_test,
             y_pred,
-            target_names=[
-                label_lookup[i] for i in range(len(label_lookup)) if i in set(y_test)
-            ],
+            labels=list(label_lookup.values()),
         )
     )
 
@@ -280,9 +284,7 @@ if __name__ == "__main__":
         disp = ConfusionMatrixDisplay.from_predictions(
             y_test,
             y_pred,
-            display_labels=[
-                label_lookup[i] for i in range(len(label_lookup)) if i in set(y_test)
-            ],
+            labels=list(label_lookup.values()),
             normalize="true",
         )
         disp.figure_.suptitle("Confusion Matrix")
