@@ -67,23 +67,6 @@ def featurize(blob: ForegroundBlob) -> np.ndarray:
     )
 
 
-class DropNamedFeatures(_BaseFilter):
-    def __init__(self, names: list[str]):
-        self.names = names
-        self.indices = [FEATURE_NAMES.index(name) for name in names]
-        super().__init__(score_func=DropNamedFeatures.dummy_score)
-
-    @staticmethod
-    def dummy_score(X, y):
-        return np.zeros(X.shape[1]), np.ones(X.shape[1])
-
-    @override
-    def _get_support_mask(self) -> np.ndarray:
-        mask = np.ones(len(FEATURE_NAMES), dtype=bool)
-        mask[self.indices] = False
-        return mask
-
-
 def _sanity_check_labels(annotations: dict):
     unique_labels = set()
     for key, blobs in annotations.items():
@@ -147,10 +130,9 @@ def load_annotations_as_data(
     return features, labels, files, bboxes, label_lookup
 
 
-def new_estimator(drop_features: list[str]) -> Pipeline:
+def new_estimator() -> Pipeline:
     return Pipeline(
         [
-            ("drop", DropNamedFeatures(drop_features)),
             ("zscore", StandardScaler()),
             ("features", SelectKBest()),
             ("classifier", DecisionTreeClassifier()),
@@ -176,20 +158,7 @@ def get_sample_weights(classes, rebalance):
 
 
 def model_selection(x, y, rebalance: bool | float, max_k: int, cv: int = 5) -> Pipeline:
-    # Drop raw moments
-    features_to_drop = [
-        "m00",
-        "m10",
-        "m01",
-        "m20",
-        "m11",
-        "m02",
-        "m30",
-        "m21",
-        "m12",
-        "m03",
-    ]
-    cv_model = new_estimator(features_to_drop)
+    cv_model = new_estimator()
     weight = get_sample_weights(y, rebalance)
 
     searcher = GridSearchCV(
@@ -256,11 +225,8 @@ def main(
     if visualize:
         import matplotlib.pyplot as plt
 
-        dropper : DropNamedFeatures = model[0]
-        which_features = np.arange(len(FEATURE_NAMES))
-        which_features = which_features[dropper.get_support()]
-        selector: SelectKBest = model[2]
-        which_features = which_features[selector.get_support()]
+        selector: SelectKBest = model[1]
+        which_features = selector.get_support(indices=True)
         n_features = len(which_features)
         sub_features = features[:, which_features]
 
