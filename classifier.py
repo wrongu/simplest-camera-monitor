@@ -1,11 +1,12 @@
 import json
 import pickle
 from pathlib import Path
-from typing import Optional
+from typing import Optional, override
 
 import cv2 as cv
 import numpy as np
 from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection._univariate_selection import _BaseFilter
 from sklearn.metrics import ConfusionMatrixDisplay, classification_report
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.pipeline import Pipeline
@@ -64,6 +65,23 @@ def featurize(blob: ForegroundBlob) -> np.ndarray:
             *np.median(blob.image[blob.mask > 0], axis=0),
         ]
     )
+
+
+class DropNamedFeatures(_BaseFilter):
+    def __init__(self, names: list[str]):
+        self.names = names
+        self.indices = [FEATURE_NAMES.index(name) for name in names]
+        super().__init__(score_func=DropNamedFeatures.dummy_score)
+
+    @staticmethod
+    def dummy_score(X, y):
+        return np.zeros(X.shape[1]), np.ones(X.shape[1])
+
+    @override
+    def _get_support_mask(self) -> np.ndarray:
+        mask = np.ones(len(FEATURE_NAMES), dtype=bool)
+        mask[self.indices] = False
+        return mask
 
 
 def _sanity_check_labels(annotations: dict):
@@ -129,9 +147,10 @@ def load_annotations_as_data(
     return features, labels, files, bboxes, label_lookup
 
 
-def new_estimator() -> Pipeline:
+def new_estimator(drop_features: list[str]) -> Pipeline:
     return Pipeline(
         [
+            ("drop", DropNamedFeatures(drop_features)),
             ("zscore", StandardScaler()),
             ("features", SelectKBest()),
             ("classifier", DecisionTreeClassifier()),
@@ -157,7 +176,20 @@ def get_sample_weights(classes, rebalance):
 
 
 def model_selection(x, y, rebalance: bool | float, max_k: int, cv: int = 5) -> Pipeline:
-    cv_model = new_estimator()
+    # Drop raw moments
+    features_to_drop = [
+        "m00",
+        "m10",
+        "m01",
+        "m20",
+        "m11",
+        "m02",
+        "m30",
+        "m21",
+        "m12",
+        "m03",
+    ]
+    cv_model = new_estimator(features_to_drop)
     weight = get_sample_weights(y, rebalance)
 
     searcher = GridSearchCV(
@@ -201,23 +233,6 @@ def main(
         annot_file, binary_detection
     )
 
-    # Drop raw moments
-    features_to_drop = [
-        "m00",
-        "m10",
-        "m01",
-        "m20",
-        "m11",
-        "m02",
-        "m30",
-        "m21",
-        "m12",
-        "m03",
-    ]
-    drop_indices = [FEATURE_NAMES.index(f) for f in features_to_drop]
-    features = np.delete(features, drop_indices, axis=1)
-    FEATURE_NAMES = [f for i, f in enumerate(FEATURE_NAMES) if i not in drop_indices]
-
     X_train, X_test, y_train, y_test, files_train, files_test, bb_train, bb_test = (
         train_test_split(
             features,
@@ -241,8 +256,11 @@ def main(
     if visualize:
         import matplotlib.pyplot as plt
 
-        selector: SelectKBest = model[1]
-        which_features = selector.get_support(indices=True)
+        dropper : DropNamedFeatures = model[0]
+        which_features = np.arange(len(FEATURE_NAMES))
+        which_features = which_features[dropper.get_support()]
+        selector: SelectKBest = model[2]
+        which_features = which_features[selector.get_support()]
         n_features = len(which_features)
         sub_features = features[:, which_features]
 
