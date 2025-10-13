@@ -147,7 +147,10 @@ def get_sample_weights(classes, rebalance):
     if isinstance(rebalance, bool) and rebalance:
         weight = rebalance_weight
     elif isinstance(rebalance, float) and rebalance > 0:
-        weight = (1 - rebalance) * equal_weight + rebalance * rebalance_weight
+        weight = np.exp(
+            (1 - rebalance) * np.log(equal_weight)
+            + rebalance * np.log(rebalance_weight)
+        )
     else:
         weight = equal_weight
     return weight
@@ -282,9 +285,7 @@ def main(
 
     if visualize:
         # Confusion matrix
-        disp = ConfusionMatrixDisplay.from_predictions(
-            y_test, y_pred, normalize="true"
-        )
+        disp = ConfusionMatrixDisplay.from_predictions(y_test, y_pred, normalize="true")
         disp.figure_.suptitle("Confusion Matrix")
         disp.figure_.tight_layout()
         plt.show()
