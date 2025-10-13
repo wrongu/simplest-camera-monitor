@@ -203,6 +203,7 @@ def main():
 
         if needs_features:
             annots = annotations.get(key, [])
+            to_remove = []
             for ann in annots:
                 # Find matching blob by closest bbox
                 best_blob, best_iou = None, 0.5
@@ -214,7 +215,11 @@ def main():
                 if best_blob is not None:
                     ann["features"] = featurize(best_blob).tolist()
                 else:
-                    ann["features"] = []
+                    to_remove.append(ann)
+            if to_remove:
+                print(f"Dropping {len(to_remove)} annotations from {key}")
+            for ann in to_remove:
+                annots.remove(ann)
 
     cv.destroyAllWindows()
     save_annotations(ann_path, annotations)
