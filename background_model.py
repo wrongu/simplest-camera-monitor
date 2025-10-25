@@ -21,6 +21,10 @@ class BoundingBox:
             "label": self.class_id,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "BoundingBox":
+        return cls(*d["bbox"], class_id=d["label"])
+
     @property
     def area(self) -> int:
         return self.width * self.height

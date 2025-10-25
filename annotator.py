@@ -46,6 +46,7 @@ class Interface(object):
         self.labels_dict = labels_dict
         self._active_bbox = None
         self._drag_start = None
+        self.last_keypress = -1
 
         cv.namedWindow("Interface", cv.WINDOW_AUTOSIZE)
         cv.setMouseCallback("Interface", self.on_mouse)
@@ -138,36 +139,35 @@ class Interface(object):
             else:
                 self._active_bbox = self.annotations[0]
 
-    def run_interactive(self) -> None | list[BoundingBox]:
-        if len(self.annotations) > 0:
-            self._active_bbox = self.annotations[0]
+    def run_interactive(self, extra_quit_keys=None) -> None | list[BoundingBox]:
+        quit_keys = [3, 13, 27]  # enter, return, escape
+        if extra_quit_keys is not None:
+            quit_keys.extend(extra_quit_keys)
+
         while True:
             self.refresh_display()
-            k = cv.waitKey(10)
-            if k == 27:
-                return None
-            elif ord("0") <= k <= ord("9"):
+            self.last_keypress = cv.waitKey(10)
+            if ord("0") <= self.last_keypress <= ord("9"):
                 # Label whatever is active
                 if self._active_bbox is not None:
-                    self._active_bbox.class_id = chr(k)
+                    self._active_bbox.class_id = chr(self.last_keypress)
                     if self._active_bbox not in self.annotations:
                         self.annotations.append(self._active_bbox)
                     self.select_next()
-            elif k in [40, 127]:
+            elif self.last_keypress in [40, 127]:
                 # Delete or backspace
                 if self._active_bbox is not None:
                     if self._active_bbox in self.annotations:
                         self.annotations.remove(self._active_bbox)
                     self._active_bbox = None
                 self.select_next()
-            elif k == 9:
+            elif self.last_keypress == 9:
                 # tab -> cycle
                 self.select_next()
-            elif k in [3, 13]:
-                # enter -> exit and save
+            elif self.last_keypress in quit_keys:
                 return [b for b in self.annotations if b.class_id is not None]
-            elif k != -1:
-                print(f"WTF? {k} pressed")
+            elif self.last_keypress != -1:
+                print(f"WTF? {self.last_keypress} pressed")
 
 
 def iter_files_with_flags(annotations, image_dir):
@@ -176,14 +176,17 @@ def iter_files_with_flags(annotations, image_dir):
     for time_and_file in get_all_timestamped_files_sorted(image_dir):
         timestamp, filename = time_and_file
         key = str(filename.relative_to(image_dir))
-        if key == up_through:
+        if key >= up_through:
             skipping = False
-        if not skipping:
-            needs_annotation = key not in annotations or not isinstance(
-                annotations[key], list
-            )
 
-            yield timestamp, filename, needs_annotation
+        needs_annotation = key not in annotations or not isinstance(
+            annotations[key], list
+        )
+        # Hack: old annotations may exist but involve a label that has since changed
+        if not needs_annotation:
+            needs_annotation = any(a["label"] in ["0", "4", "2"] for a in annotations[key])
+
+        yield timestamp, filename, needs_annotation and not skipping
 
 
 def main(
@@ -191,6 +194,7 @@ def main(
     bg_model: TimestampAwareBackgroundSubtractor,
     prior_annotations: dict,
     skip_no_motion: bool = False,
+    paused: bool = False,
 ):
     annot_file = image_dir / ANNOTATION_FILE
     annotations: dict[str, dict | list] = load_annotations(annot_file)
@@ -203,12 +207,18 @@ def main(
     # an image is processed, we clear recent_skipped. This way, recent_skipped always contains
     # the set of files *since* the last processed file.
     recent_skipped = deque()
+    history_left = deque(maxlen=200)
+    history_right = deque(maxlen=200)
 
     pprint(labels)
     i = 0
+    quit_requested = False
     for timestamp, filename, needs_annotation in iter_files_with_flags(
         annotations, image_dir
     ):
+        if quit_requested:
+            break
+
         key = str(filename.relative_to(image_dir))
         if not needs_annotation:
             recent_skipped.append((timestamp, filename))
@@ -220,7 +230,8 @@ def main(
             # If skipped file is part of this file's context, load it to update the model
             if ts >= timestamp - 2 * bg_model.history_seconds:
                 img = cv.imread(str(fn))
-                bg_model.apply(img, ts)
+                _, blobs = bg_model.applyWithStats(img, ts)
+                history_left.append((key, img, blobs))
 
         i += 1
         if i % 100 == 0:
@@ -231,29 +242,64 @@ def main(
         # to load and process this file.
         img = cv.imread(str(filename))
 
-        mask, blobs = bg_model.applyWithStats(img, timestamp)
+        _, blobs = bg_model.applyWithStats(img, timestamp)
 
         # Skip blobs that are almost certainly shadows
         blobs = [b for b in blobs if np.mean(b.shadow_correlation()) < 0.5]
 
-        if needs_annotation:
-            if len(blobs) == 0 and skip_no_motion:
+        if skip_no_motion:
+            if len(blobs) == 0:
+                needs_annotation = False
                 cv.imshow("Interface", img)
-                if cv.waitKey(1) == 27:
-                    return
-                continue
+                k = cv.waitKey(1)
+                if k == ord(" "):
+                    paused = True
 
-            interface = Interface(img, [blob.bbox for blob in blobs], labels)
-            if key in prior_annotations:
-                interface.init_with_prior_annotations(prior_annotations[key])
-            result: list[BoundingBox] = interface.run_interactive()
-            if result is not None:
-                annotations[key] = [b.to_dict() for b in result]
+        paused = paused or needs_annotation
+        # loop preconditions:
+        # - (key, img, blobs) is 'current'
+        # - history_right is empty, history_left is strictly earlier
+        # after the loop, this must all remain true. during the pause loop, history will get weird
+        while paused:
+            if key in annotations:
+                init_bboxes = [BoundingBox.from_dict(a) for a in annotations[key]]
             else:
+                init_bboxes = [blob.bbox for blob in blobs]
+            interface = Interface(img, init_bboxes, labels)
+            if key in prior_annotations and key not in annotations:
+                interface.init_with_prior_annotations(prior_annotations[key])
+            result: list[BoundingBox] = interface.run_interactive(
+                extra_quit_keys=[ord(","), ord("."), ord(" ")]
+            )
+            if interface.last_keypress == 27:
+                quit_requested = True
                 break
+            elif len(result) > 0:
+                annotations[key] = [b.to_dict() for b in result]
+
+            if interface.last_keypress == ord(" "):
+                while len(history_right) > 0:
+                    history_left.append((key, img, blobs))
+                    key, img, blobs = history_right.pop()
+                paused = False
+            elif interface.last_keypress == ord(","):
+                if len(history_left) > 0:
+                    history_right.append((key, img, blobs))
+                    key, img, blobs = history_left.pop()
+            elif interface.last_keypress == ord("."):
+                if len(history_right) > 0:
+                    history_left.append((key, img, blobs))
+                    key, img, blobs = history_right.pop()
+                else:
+                    # This breaks the current 'paused' loop and returns control to the outer 'for'
+                    # loop, thus loading the next image that is not yet loaded, but then we'll hit
+                    # the 'while paused' block again on the next frame
+                    break
+
+        history_left.append((key, img, blobs))
 
     cv.destroyAllWindows()
-    save_annotations(annot_file, annotations)
+    save_annotations(annot_file, annotations, through_key=key)
     print(f"Annotations saved to {annot_file}")
 
 
@@ -273,6 +319,11 @@ if __name__ == "__main__":
         "--skip-no-motion",
         action="store_true",
         help="If True, only prompt the user to label if motion is detected.",
+    )
+    parser.add_argument(
+        "--paused",
+        action="store_true",
+        help="If set, start the script in 'paused' mode."
     )
     args = parser.parse_args()
 
@@ -317,4 +368,4 @@ if __name__ == "__main__":
         with open(args.prior_annotations, "r") as f:
             prior_annotations = json.load(f)
 
-    main(image_dir, model, prior_annotations, args.skip_no_motion)
+    main(image_dir, model, prior_annotations, args.skip_no_motion, args.paused)
