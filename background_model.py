@@ -101,6 +101,8 @@ class TimestampAwareBackgroundSubtractor(object):
         morph_thresh: float = 0.3,
         morph_iters: int = 3,
         default_fps: float = 0.1,
+        prep_hist_eq: float = 0.5,
+        prep_blur: int = 3,
         region_of_interest: Optional[cv.Mat] = None,
         night_mode_kwargs: Optional[dict] = None,
         debug_dir: Optional[Path] = None,
@@ -113,6 +115,8 @@ class TimestampAwareBackgroundSubtractor(object):
         self.fps = default_fps
         self.last_timestamp = 0.0
         self.update_fps(delta_t=1.0 / default_fps)
+        self.prep_hist_eq = prep_hist_eq
+        self.prep_blur = prep_blur
 
         # Parameters for post-processing cleanup
         self.area_threshold = area_threshold
@@ -157,6 +161,8 @@ class TimestampAwareBackgroundSubtractor(object):
                     self.area_threshold = v
                 case "shadow_correlation_threshold":
                     self.shadow_correlation_threshold = v
+                case "hist_eq":
+                    self.prep_hist_eq = v
                 case "morph_radius":
                     self.morphology_fn.radius = v
                 case "morph_thresh":
@@ -173,6 +179,27 @@ class TimestampAwareBackgroundSubtractor(object):
             self.fps = self.default_fps
         else:
             self.fps += (1.0 / delta_t - self.fps) * ema_alpha
+
+    def preprocess(self, img: cv.Mat) -> cv.Mat:
+        if self.prep_blur > 0:
+            img = cv.GaussianBlur(
+                img,
+                ksize=(self.prep_blur, self.prep_blur),
+                sigmaX=0.0,
+                sigmaY=0.0,
+                borderType=cv.BORDER_CONSTANT,
+            )
+
+        l, a, b = cv.split(cv.cvtColor(img, cv.COLOR_BGR2LAB))
+        id_lut = np.arange(256)
+        hist_l = np.bincount(l.ravel(), minlength=256)
+        cumul_l = np.cumsum(hist_l)
+        eq_lut = cumul_l * 255 / cumul_l[-1]
+        lut = np.round(
+            id_lut * (1 - self.prep_hist_eq) + eq_lut * self.prep_hist_eq
+        ).astype(np.uint8)
+        l = cv.LUT(l, lut=lut)
+        return cv.cvtColor(cv.merge((l, a, b)), cv.COLOR_LAB2BGR)
 
     def apply(self, img: cv.Mat, t: Optional[float] = None) -> cv.Mat:
         if t is None:
@@ -199,6 +226,8 @@ class TimestampAwareBackgroundSubtractor(object):
                 self._night_mode_kwargs if is_night_mode else self._day_mode_kwargs
             )
             self.setArgs(**new_kwargs)
+
+        img = self.preprocess(img)
 
         # Update the bg model with a time-adaptive learning rate and get the fg mask
         self.last_timestamp = t
