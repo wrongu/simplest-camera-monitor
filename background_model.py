@@ -8,25 +8,52 @@ import numpy as np
 
 
 @dataclass
-class ForegroundBlob:
-    background: cv.Mat
-    image: cv.Mat
-    area: int
-    bbox: tuple[int, int, int, int]  # x, y, width, height
-    mask: cv.Mat
+class BoundingBox:
+    x: int  # left
+    y: int  # top
+    width: int
+    height: int
     class_id: Optional[str] = None
 
-    def shadow_correlation(self) -> tuple[float, float, float]:
-        bg_bgr = self.background[self.mask > 0]
-        im_bgr = self.image[self.mask > 0]
-        return tuple(
-            np.corrcoef(im, bg)[0, 1].item() for im, bg in zip(im_bgr.T, bg_bgr.T)
-        )
+    def to_dict(self) -> dict:
+        return {
+            "bbox": [int(self.x), int(self.y), int(self.width), int(self.height)],
+            "label": self.class_id,
+        }
+
+    @property
+    def area(self) -> int:
+        return self.width * self.height
+
+    def set_bounds(self, x0, y0, x1, y1):
+        left, top = min(x0, x1), min(y0, y1)
+        right, bottom = max(x0, x1), max(y0, y1)
+        self.x, self.y = left, top
+        self.width, self.height = right - left, bottom - top
+
+    def distance(self, x, y):
+        # Calculate rectangle bounds
+        left, top = self.x, self.y
+        right, bottom = left + self.width, top + self.height
+
+        if left <= x <= right and top <= y <= bottom:
+            # If point is inside the rectangle, compute distance to nearest edge
+            dist_left = abs(x - left)
+            dist_right = abs(x - right)
+            dist_top = abs(y - top)
+            dist_bottom = abs(y - bottom)
+            return min(dist_left, dist_right, dist_top, dist_bottom)
+        else:
+            # If point is outside the rectangle, find the nearest point on the rectangle and
+            # calculate distance to that point
+            clamped_x = max(left, min(x, right))
+            clamped_y = max(top, min(y, bottom))
+            return np.sqrt((x - clamped_x) ** 2 + (y - clamped_y) ** 2)
 
     @staticmethod
-    def iou(bbox1, bbox2):
-        x1, y1, w1, h1 = bbox1
-        x2, y2, w2, h2 = bbox2
+    def iou(bbox1: "BoundingBox", bbox2: "BoundingBox"):
+        x1, y1, w1, h1 = bbox1.x, bbox1.y, bbox1.width, bbox1.height
+        x2, y2, w2, h2 = bbox2.x, bbox2.y, bbox2.width, bbox2.height
 
         xi1 = max(x1, x2)
         yi1 = max(y1, y2)
@@ -45,6 +72,35 @@ class ForegroundBlob:
             return 0.0
 
         return intersection / union
+
+    def draw(self, img: cv.Mat, color: tuple[int, int, int]) -> cv.Mat:
+        cv.rectangle(
+            img, (self.x, self.y), (self.x + self.width, self.y + self.height), color, 2
+        )
+        cv.putText(
+            img,
+            f"{self.class_id}",
+            (self.x + 10, self.y + 10),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+        )
+        return img
+
+
+@dataclass
+class ForegroundBlob:
+    bbox: BoundingBox
+    image: cv.Mat
+    background: cv.Mat
+    mask: cv.Mat
+
+    def shadow_correlation(self) -> tuple[float, float, float]:
+        bg_bgr = self.background[self.mask > 0]
+        im_bgr = self.image[self.mask > 0]
+        return tuple(
+            np.corrcoef(im, bg)[0, 1].item() for im, bg in zip(im_bgr.T, bg_bgr.T)
+        )
 
 
 def _is_night_mode_image(img: cv.Mat, grayness_threshold: float = 0.01) -> bool:
@@ -269,10 +325,9 @@ class TimestampAwareBackgroundSubtractor(object):
             # background and image object references but has a different mask
             blobs.append(
                 ForegroundBlob(
+                    bbox=BoundingBox(*stats[i, :4]),
                     background=background,
                     image=img,
-                    area=stats[i, cv.CC_STAT_AREA],
-                    bbox=stats[i, :4],  # x, y, width, height
                     mask=np.array(labels == i).astype(np.uint8) * clean_mask,
                 )
             )
