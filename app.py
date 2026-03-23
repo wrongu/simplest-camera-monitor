@@ -10,6 +10,8 @@ ONE_DAY_SECONDS = 24 * 60 * 60
 
 class CameraMonitorApp(hass.Hass):
     def initialize(self):
+        self.initialized = False
+
         self.monitors: list[CameraMonitor] = []
         for config in self.args["cameras"]:
             mon = CameraMonitor(
@@ -55,35 +57,39 @@ class CameraMonitorApp(hass.Hass):
         self.cleanup_files()
         self.run_every(self.poll, interval=self.args["poll_frequency"])
         self.run_every(self.cleanup_files, interval=ONE_DAY_SECONDS / 6)
+        self.initialized = True
 
     def poll(self, *args, **kwargs):
-        for monitor in self.monitors:
-            monitor.poll()
+        if self.initialized:
+            for monitor in self.monitors:
+                monitor.poll()
 
     def cleanup_files(self, *args, **kwargs):
         for monitor in self.monitors:
             monitor.cleanup_files()
 
     def handle_state_transition(self, monitor: CameraMonitor, new_state: State):
-        if new_state in (State.CANT_CONNECT, State.CRASHED, State.REBOOT):
-            for cls in self.trigger_classes:
-                self.get_entity(f"binary_sensor.{monitor.name}_{cls}").set_state(
-                    "unavailable"
-                )
-        elif new_state == State.RUNNING:
-            for cls in self.trigger_classes:
-                self.get_entity(f"binary_sensor.{monitor.name}_{cls}").set_state(
-                    "available"
-                )
+        if self.initialized:
+            if new_state in (State.CANT_CONNECT, State.CRASHED, State.REBOOT):
+                for cls in self.trigger_classes:
+                    self.get_entity(f"binary_sensor.{monitor.name}_{cls}").set_state(
+                        "unavailable"
+                    )
+            elif new_state == State.RUNNING:
+                for cls in self.trigger_classes:
+                    self.get_entity(f"binary_sensor.{monitor.name}_{cls}").set_state(
+                        "available"
+                    )
 
     def handle_detections(self, monitor: CameraMonitor, detections: list[str]):
-        for cls in self.trigger_classes:
-            sensor = self.get_entity(f"binary_sensor.{monitor.name}_{cls}")
-            if cls in detections:
-                if sensor.state != "on":
-                    self.log(f"DETECTED {cls}", level="WARNING")
-                    sensor.set_state("on")
-            else:
-                if sensor.state != "off":
-                    self.log(f"DEACTIVATED {cls}", level="INFO")
-                    sensor.set_state("off")
+        if self.initialized:
+            for cls in self.trigger_classes:
+                sensor = self.get_entity(f"binary_sensor.{monitor.name}_{cls}")
+                if cls in detections:
+                    if sensor.state != "on":
+                        self.log(f"DETECTED {cls}", level="WARNING")
+                        sensor.set_state("on")
+                else:
+                    if sensor.state != "off":
+                        self.log(f"DEACTIVATED {cls}", level="INFO")
+                        sensor.set_state("off")
