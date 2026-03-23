@@ -232,14 +232,12 @@ class CameraMonitor(object):
         now = time.time()
 
         # Check that all logged filenames are appropriately timestamped
-        ensure_files_timestamp_named(
-            self.monitor.output_dir, dry_run=False, glob="**/*.jpg"
-        )
+        ensure_files_timestamp_named(self.output_dir, dry_run=False, glob="**/*.jpg")
 
         # Delete images that are older than 24h and detected blobs that are older than 72h
         n_images_deleted = 0
         for t, f in get_all_timestamped_files_sorted(
-            self.monitor.output_dir, glob="20*/**/*.jpg"
+            self.output_dir, glob="20*/**/*.jpg"
         ):
             if now - t > ONE_DAY_SECONDS:
                 f.unlink()
@@ -248,7 +246,7 @@ class CameraMonitor(object):
 
         n_blobs_deleted = 0
         for t, f in get_all_timestamped_files_sorted(
-            self.monitor.output_dir, glob="blobs/**/*.jpg"
+            self.output_dir, glob="blobs/**/*.jpg"
         ):
             if now - t > 3 * ONE_DAY_SECONDS:
                 f.unlink()
