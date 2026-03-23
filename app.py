@@ -1,167 +1,89 @@
-import time
-from enum import Enum
-
 import appdaemon.plugins.hass.hassapi as hass
 import cv2 as cv
 
-from background_model import ForegroundBlob, TimestampAwareBackgroundSubtractor
-from camera_monitor import CameraMonitor
+from background_model import TimestampAwareBackgroundSubtractor
+from camera_monitor import CameraMonitor, State
 from cameras import ONVIFCameraWrapper
-from image_loader import ensure_files_timestamp_named, get_all_timestamped_files_sorted
 
 ONE_DAY_SECONDS = 24 * 60 * 60
 
 
-class State(Enum):
-    INIT = -1
-    RUNNING = 0
-    CANT_CONNECT = 1
-    CRASHED = 2
-    REBOOT = 3
-
-
 class CameraMonitorApp(hass.Hass):
     def initialize(self):
-        self.save_blobs = self.args.get("save_blobs", True)
+        self.monitors: list[CameraMonitor] = []
+        for config in self.args["cameras"]:
+            mon = CameraMonitor(
+                camera=ONVIFCameraWrapper(
+                    config["url"],
+                    config["port"],
+                    config["username"],
+                    config["password"],
+                    resolution=tuple(config["resolution"]),
+                ),
+                name=config["name"],
+                brightness_threshold=config["brightness_threshold"],
+                history_seconds=config["history_seconds"],
+                bg_model=TimestampAwareBackgroundSubtractor(
+                    history_seconds=config["history_seconds"],
+                    var_threshold=config["var_threshold"],
+                    detect_shadows=config["detect_shadows"],
+                    area_threshold=config["area_threshold"],
+                    shadow_correlation_threshold=config["shadow_correlation_threshold"],
+                    morph_radius=config["morph_radius"],
+                    morph_thresh=config["morph_thresh"],
+                    morph_iters=config["morph_iters"],
+                    default_fps=1 / config["poll_frequency"],
+                    region_of_interest=cv.imread(
+                        config["region_of_interest"], cv.IMREAD_GRAYSCALE
+                    ),
+                    night_mode_kwargs={
+                        k[6:]: v for k, v in config.items() if k.startswith("night_")
+                    },
+                ),
+                save_blobs=config.get("save_blobs", True),
+                model_file=config.get("model_file", None),
+                output_dir=config["output_dir"],
+                log=self.log,
+                on_state_transition=self.handle_state_transition,
+                on_detection=self.handle_detections,
+            )
 
-        self.monitor = CameraMonitor(
-            brightness_threshold=self.args["brightness_threshold"],
-            history_seconds=self.args["history_seconds"],
-            bg_model=TimestampAwareBackgroundSubtractor(
-                history_seconds=self.args["history_seconds"],
-                var_threshold=self.args["var_threshold"],
-                detect_shadows=self.args["detect_shadows"],
-                area_threshold=self.args["area_threshold"],
-                shadow_correlation_threshold=self.args["shadow_correlation_threshold"],
-                morph_radius=self.args["morph_radius"],
-                morph_thresh=self.args["morph_thresh"],
-                morph_iters=self.args["morph_iters"],
-                default_fps=1 / self.args["poll_frequency"],
-                region_of_interest=cv.imread(self.args["region_of_interest"], cv.IMREAD_GRAYSCALE),
-                night_mode_kwargs={
-                    k[6:]: v for k, v in self.args.items() if k.startswith("night_")
-                },
-            ),
-            model_file=self.args["model_file"],
-            output_dir=self.args["output_dir"],
-            log=self.log,
-        )
+            self.monitors.append(mon)
 
-        self.camera = ONVIFCameraWrapper(
-            self.args["url"],
-            self.args["port"],
-            self.args["username"],
-            self.args["password"],
-            resolution=tuple(self.args["resolution"]),
-        )
-
-        self.log(f"Loaded model with labels: {self.monitor.label_lookup}")
-
-        self.sensor = self.get_entity(self.args["hass_sensor_entity"])
-        self.sensor.set_state("off")
-
-        self.trigger_class = self.args["watch_for_class"]
-
-        self.state_machine = State.INIT
-        self.state_meta = None
-        self.state_transition(State.RUNNING, since=time.time())
+        self.trigger_classes = self.args.get("watch_for_class", [])
 
         self.cleanup_files()
         self.run_every(self.poll, interval=self.args["poll_frequency"])
         self.run_every(self.cleanup_files, interval=ONE_DAY_SECONDS / 6)
 
-    def state_transition(self, new_state: State, **meta):
-        old_state = self.state_machine
-        if old_state != new_state:
-            self.log(f"State transition {old_state} -> {new_state}")
-            self.state_machine = new_state
-            self.state_meta = meta
-
-            if new_state in (State.CANT_CONNECT, State.CRASHED, State.REBOOT):
-                self.sensor.set_state("unavailable")
-
     def poll(self, *args, **kwargs):
-        if self.state_machine == State.RUNNING:
-            try:
-                frame = self.camera.get_frame()
-                if frame is not None:
-                    foreground_objects = self.monitor.process_frame(
-                        frame,
-                        timestamp=time.time(),
-                        detect_stuff=True,
-                        save_blobs=self.save_blobs,
-                    )
-                    self.handle_detections(foreground_objects)
-            except ConnectionError:
-                self.state_transition(State.CANT_CONNECT, since=time.time())
-
-        elif self.state_machine == State.CANT_CONNECT:
-            # For the first minute of not being able to connect, just keep trying
-            if time.time() - self.state_meta.get("since", 0) < 60:
-                try:
-                    frame = self.camera.get_frame()
-                    self.state_transition(State.RUNNING, since=time.time())
-                    self.monitor.process_frame(frame)
-                except ConnectionError:
-                    pass
-            # After a minute, try sending a reboot signal to the camera
-            else:
-                self.log("Attempting to reboot camera via HTTP request")
-                if self.camera.reboot():
-                    self.log("Reboot request sent successfully")
-                    self.state_transition(State.REBOOT, since=time.time())
-                else:
-                    self.log("Failed to send reboot request", level="WARNING")
-                    self.state_transition(State.CRASHED, since=time.time())
-
-        elif self.state_machine == State.REBOOT:
-            # Wait 30 seconds after sending the reboot command, then try to connect again
-            if time.time() - self.state_meta.get("since", 0) > 30:
-                try:
-                    frame = self.camera.get_frame()
-                    self.state_transition(State.RUNNING, since=time.time())
-                    self.monitor.process_frame(frame)
-                except ConnectionError:
-                    self.log(
-                        "Still cannot connect after reboot attempt", level="WARNING"
-                    )
-                    self.state_transition(State.CRASHED, since=time.time())
-
-    def handle_detections(self, detected_things: list[ForegroundBlob]):
-        if detected_things:
-            if any(obj.class_id == self.trigger_class for obj in detected_things):
-                if self.sensor.state != "on":
-                    self.log(f"DETECTED {self.trigger_class}", level="WARNING")
-                    self.sensor.set_state("on")
-        else:
-            if self.sensor.state != "off":
-                self.log(f"DEACTIVATED {self.trigger_class}", level="INFO")
-                self.sensor.set_state("off")
+        for monitor in self.monitors:
+            monitor.poll()
 
     def cleanup_files(self, *args, **kwargs):
-        self.log("Starting cleanup")
-        now = time.time()
+        for monitor in self.monitors:
+            monitor.cleanup_files()
 
-        # Check that all logged filenames are appropriately timestamped
-        ensure_files_timestamp_named(
-            self.monitor.output_dir, dry_run=False, glob="**/*.jpg"
-        )
+    def handle_state_transition(self, monitor: CameraMonitor, new_state: State):
+        if new_state in (State.CANT_CONNECT, State.CRASHED, State.REBOOT):
+            for cls in self.trigger_classes:
+                self.get_entity(f"binary_sensor.{monitor.name}_{cls}").set_state(
+                    "unavailable"
+                )
+        elif new_state == State.RUNNING:
+            for cls in self.trigger_classes:
+                self.get_entity(f"binary_sensor.{monitor.name}_{cls}").set_state(
+                    "available"
+                )
 
-        # Delete images that are older than 24h and detected blobs that are older than 72h
-        n_images_deleted = 0
-        for t, f in get_all_timestamped_files_sorted(
-            self.monitor.output_dir, glob="20*/**/*.jpg"
-        ):
-            if now - t > ONE_DAY_SECONDS:
-                f.unlink()
-                n_images_deleted += 1
-        self.log(f"Deleted {n_images_deleted} old images")
-
-        n_blobs_deleted = 0
-        for t, f in get_all_timestamped_files_sorted(
-            self.monitor.output_dir, glob="blobs/**/*.jpg"
-        ):
-            if now - t > 3 * ONE_DAY_SECONDS:
-                f.unlink()
-                n_blobs_deleted += 1
-        self.log(f"Deleted {n_blobs_deleted} old blobs files")
+    def handle_detections(self, monitor: CameraMonitor, detections: list[str]):
+        for cls in self.trigger_classes:
+            sensor = self.get_entity(f"binary_sensor.{monitor.name}_{cls}")
+            if cls in detections:
+                if sensor.state != "on":
+                    self.log(f"DETECTED {cls}", level="WARNING")
+                    sensor.set_state("on")
+            else:
+                if sensor.state != "off":
+                    self.log(f"DEACTIVATED {cls}", level="INFO")
+                    sensor.set_state("off")

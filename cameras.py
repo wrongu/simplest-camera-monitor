@@ -1,5 +1,6 @@
 import threading
 import time
+from pathlib import Path
 from typing import Protocol
 
 import cv2 as cv
@@ -7,10 +8,12 @@ import numpy as np
 import requests
 from onvif import ONVIFCamera
 
+from image_loader import get_all_timestamped_files_sorted
+
 
 class Camera(Protocol):
-    def get_frame(self) -> cv.Mat: ...
-    def get_last_frame(self) -> cv.Mat: ...
+    def get_frame(self) -> tuple[float, cv.Mat]: ...
+    def get_last_frame(self) -> tuple[float, cv.Mat]: ...
     def reboot(self) -> bool: ...
 
 
@@ -83,16 +86,16 @@ class ONVIFCameraWrapper(Camera):
         self.stream.daemon = True
         self.stream.start()
 
-    def get_frame(self):
+    def get_frame(self) -> tuple[float, cv.Mat]:
         frame = self.stream.frame
         if frame is not None:
             self.last_frame = frame
             self.last_frame_time = time.time()
-        return frame
+        return self.last_frame_time, frame
 
-    def get_last_frame(self):
+    def get_last_frame(self) -> tuple[float, cv.Mat]:
         if self.last_frame is not None and (time.time() - self.last_frame_time) < 5:
-            return self.last_frame
+            return self.last_frame_time, self.last_frame
         else:
             return self.get_frame()
 
@@ -111,20 +114,20 @@ class ESPHomeCameraWrapper(Camera):
         self.components = {"switch/reboot": None, "switch/flash": None}
         self.poll_components()
 
-    def get_frame(self) -> cv.Mat:
+    def get_frame(self) -> tuple[float, cv.Mat]:
         resp = requests.get(self.url, timeout=10)
         if resp.status_code == 200:
             image_array = np.asarray(bytearray(resp.content), dtype=np.uint8)
             frame = cv.imdecode(image_array, cv.IMREAD_COLOR)
             self.last_frame = frame
             self.last_frame_time = time.time()
-            return frame
+            return self.last_frame_time, frame
         else:
             raise ConnectionError(f"Failed to get frame: {resp.status_code}")
 
-    def get_last_frame(self) -> cv.Mat:
+    def get_last_frame(self) -> tuple[float, cv.Mat]:
         if self.last_frame is not None and (time.time() - self.last_frame_time) < 5:
-            return self.last_frame
+            return self.last_frame_time, self.last_frame
         else:
             return self.get_frame()
 
@@ -149,3 +152,26 @@ class ESPHomeCameraWrapper(Camera):
                 return False
         else:
             return False
+
+
+class LoggedImagePseudoCamera(Camera):
+    def __init__(self, image_dir: Path):
+        self.image_dir = image_dir
+        self.last_frame = None
+        self.last_frame_idx = 0
+        self.timestamped_images = get_all_timestamped_files_sorted(image_dir)
+        self._last_frame = None
+
+    def get_frame(self) -> tuple[float, cv.Mat]:
+        self.last_frame_idx += 1
+        ts, im = self.timestamped_images[self.last_frame_idx]
+        self._last_frame = cv.imread(str(im), cv.IMREAD_COLOR)
+        return ts, self._last_frame
+
+    def get_last_frame(self) -> tuple[float, cv.Mat]:
+        return self.timestamped_images[self.last_frame_idx][0], self._last_frame
+
+    def reboot(self) -> bool:
+        self.last_frame_idx = 0
+        self._last_frame = None
+        return True
