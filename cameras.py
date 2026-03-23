@@ -48,6 +48,7 @@ class ONVIFCameraWrapper(Camera):
         self._port = port
         self._username = username
         self._password = password
+        resolution = tuple(resolution)
         self._resolution = resolution
         self.cam = ONVIFCamera(host, port, username, password)
         self.media = self.cam.create_media_service()
