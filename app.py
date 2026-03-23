@@ -32,7 +32,7 @@ class CameraMonitorApp(hass.Hass):
                     morph_radius=config["morph_radius"],
                     morph_thresh=config["morph_thresh"],
                     morph_iters=config["morph_iters"],
-                    default_fps=1 / config["poll_frequency"],
+                    default_fps=1 / self.args["poll_frequency"],
                     region_of_interest=cv.imread(
                         config["region_of_interest"], cv.IMREAD_GRAYSCALE
                     ),
