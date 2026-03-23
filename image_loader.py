@@ -106,6 +106,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Perform a dry run without renaming files.",
     )
+    parser.add_argument("--thin", type=float)
     parser.add_argument(
         "--glob",
         type=str,
@@ -114,4 +115,17 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    ensure_files_timestamp_named(args.directory, dry_run=args.dry_run, glob=args.glob)
+    # ensure_files_timestamp_named(args.directory, dry_run=args.dry_run, glob=args.glob)
+    if args.thin:
+        last_time = 0.0
+        for time, file in get_all_timestamped_files_sorted(args.directory):
+            delta_t = time - last_time
+            if delta_t < args.thin:
+                if args.dry_run:
+                    print(f"rm {file}")
+                else:
+                    file.unlink()
+                continue
+            if args.dry_run:
+                print(f"keep {file}")
+            last_time = time
