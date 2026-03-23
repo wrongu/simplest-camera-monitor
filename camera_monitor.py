@@ -89,7 +89,10 @@ class CameraMonitor(object):
             self.state_meta = meta
 
             if self.on_state_transition is not None:
-                self.on_state_transition(self, new_state)
+                try:
+                    self.on_state_transition(self, new_state)
+                except Exception as e:
+                    self.log(f"Error in on_state_transition: {e}", level="ERROR")
 
     def poll(self):
         if self.state_machine == State.RUNNING:
@@ -142,14 +145,17 @@ class CameraMonitor(object):
 
     def handle_detections(self, detected_things: list[ForegroundBlob]):
         if self.on_detection is not None:
-            self.on_detection(
-                self,
-                [
-                    thing.class_id
-                    for thing in detected_things
-                    if thing.class_id is not None
-                ],
-            )
+            try:
+                self.on_detection(
+                    self,
+                    [
+                        thing.class_id
+                        for thing in detected_things
+                        if thing.class_id is not None
+                    ],
+                )
+            except Exception as e:
+                self.log(f"Error in on_detection callback: {e}", level="ERROR")
 
     @staticmethod
     def _save_image(path: Path, image: cv.Mat):
