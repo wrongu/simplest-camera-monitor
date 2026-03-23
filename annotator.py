@@ -153,7 +153,6 @@ class Interface(object):
                     self._active_bbox.class_id = chr(self.last_keypress)
                     if self._active_bbox not in self.annotations:
                         self.annotations.append(self._active_bbox)
-                    self.select_next()
             elif self.last_keypress in [40, 127]:
                 # Delete or backspace
                 if self._active_bbox is not None:
@@ -184,7 +183,9 @@ def iter_files_with_flags(annotations, image_dir):
         )
         # Hack: old annotations may exist but involve a label that has since changed
         if not needs_annotation:
-            needs_annotation = any(a["label"] in ["0", "4", "2"] for a in annotations[key])
+            needs_annotation = any(
+                a["label"] in ["0", "4", "2", "6", "7"] for a in annotations[key]
+            )
 
         yield timestamp, filename, needs_annotation and not skipping
 
@@ -211,10 +212,9 @@ def main(
     history_right = deque(maxlen=200)
 
     pprint(labels)
-    i = 0
     quit_requested = False
-    for timestamp, filename, needs_annotation in iter_files_with_flags(
-        annotations, image_dir
+    for i, (timestamp, filename, needs_annotation) in enumerate(
+        iter_files_with_flags(annotations, image_dir)
     ):
         if quit_requested:
             break
@@ -227,13 +227,13 @@ def main(
         # Burn through all skipped files and use any that are recent enough to update the BG model
         while recent_skipped:
             ts, fn = recent_skipped.popleft()
+            skipped_key = str(fn.relative_to(image_dir))
             # If skipped file is part of this file's context, load it to update the model
             if ts >= timestamp - 2 * bg_model.history_seconds:
                 img = cv.imread(str(fn))
                 _, blobs = bg_model.applyWithStats(img, ts)
-                history_left.append((key, img, blobs))
+                history_left.append((skipped_key, img, blobs))
 
-        i += 1
         if i % 100 == 0:
             print(f"Completed thru {i} images, current: {filename}")
             save_annotations(annot_file, annotations, through_key=key)
@@ -276,6 +276,8 @@ def main(
                 break
             elif len(result) > 0:
                 annotations[key] = [b.to_dict() for b in result]
+            elif len(result) == 0 and key in annotations:
+                del annotations[key]
 
             if interface.last_keypress == ord(" "):
                 while len(history_right) > 0:
@@ -323,7 +325,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--paused",
         action="store_true",
-        help="If set, start the script in 'paused' mode."
+        help="If set, start the script in 'paused' mode.",
     )
     args = parser.parse_args()
 
