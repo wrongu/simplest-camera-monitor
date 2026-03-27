@@ -45,6 +45,7 @@ class CameraMonitorApp(hass.Hass):
                 save_blobs=config.get("save_blobs", True),
                 model_file=config.get("model_file", None),
                 output_dir=config["output_dir"],
+                log_lifespan=config.get("log_lifespan", ONE_DAY_SECONDS / 2),
                 log=self.log,
                 on_state_transition=self.handle_state_transition,
                 on_detection=self.handle_detections,

@@ -38,6 +38,7 @@ class CameraMonitor(object):
         save_blobs: bool = False,
         model_file: Optional[Path | str] = None,
         output_dir: Optional[Path | str] = None,
+        log_lifespan: int = ONE_DAY_SECONDS,
         log=None,
         on_state_transition: Optional[Callable[["CameraMonitor", State], None]] = None,
         on_detection: Optional[Callable[["CameraMonitor", list[str]], None]] = None,
@@ -67,6 +68,8 @@ class CameraMonitor(object):
             self.output_dir = Path(output_dir)
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self.reinitialize_bg_model_from_saved_images()
+        self.log_lifespan = log_lifespan
+        self.cleanup_files()
 
         self.on_state_transition = on_state_transition
         self.on_detection = on_detection
@@ -245,7 +248,7 @@ class CameraMonitor(object):
         for t, f in get_all_timestamped_files_sorted(
             self.output_dir, glob="20*/**/*.jpg"
         ):
-            if now - t > ONE_DAY_SECONDS:
+            if now - t > self.log_lifespan:
                 f.unlink()
                 n_images_deleted += 1
         self.log(f"Deleted {n_images_deleted} old images")
@@ -254,7 +257,13 @@ class CameraMonitor(object):
         for t, f in get_all_timestamped_files_sorted(
             self.output_dir, glob="blobs/**/*.jpg"
         ):
-            if now - t > 3 * ONE_DAY_SECONDS:
+            if now - t > self.log_lifespan:
                 f.unlink()
                 n_blobs_deleted += 1
         self.log(f"Deleted {n_blobs_deleted} old blobs files")
+
+        # Remove any remaining empty directories
+        for path, subdirs, files in self.output_dir.walk(top_down=False):
+            if not files and not subdirs and path != self.output_dir:
+                path.rmdir()
+        self.log("Cleanup complete.")
