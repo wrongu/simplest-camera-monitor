@@ -1,0 +1,11 @@
+name: "Camera Monitor"
+description: "ONVIF camera motion detection and object classification"
+version: "1.0.0"
+slug: "camera_monitor"
+init: false
+homeassistant_api: true
+arch:
+  - aarch64
+map:
+  - config:ro   # read /config/camera_monitor.yaml
+  - share:rw    # camera image logs (output_dir)
