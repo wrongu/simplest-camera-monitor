@@ -34,7 +34,9 @@ class CameraMonitorApp(hass.Hass):
                         var_threshold=config["var_threshold"],
                         detect_shadows=config["detect_shadows"],
                         area_threshold=config["area_threshold"],
-                        shadow_correlation_threshold=config["shadow_correlation_threshold"],
+                        shadow_correlation_threshold=config[
+                            "shadow_correlation_threshold"
+                        ],
                         morph_radius=config["morph_radius"],
                         morph_thresh=config["morph_thresh"],
                         morph_iters=config["morph_iters"],
@@ -43,7 +45,9 @@ class CameraMonitorApp(hass.Hass):
                             config["region_of_interest"], cv.IMREAD_GRAYSCALE
                         ),
                         night_mode_kwargs={
-                            k[6:]: v for k, v in config.items() if k.startswith("night_")
+                            k[6:]: v
+                            for k, v in config.items()
+                            if k.startswith("night_")
                         },
                     ),
                     save_blobs=config.get("save_blobs", True),
@@ -56,7 +60,10 @@ class CameraMonitorApp(hass.Hass):
                 )
                 monitor_slots[i] = mon
             except Exception as e:
-                self.log(f"Failed to initialize camera {config.get('name', i)}: {e}", level="ERROR")
+                self.log(
+                    f"Failed to initialize camera {config.get('name', i)}: {e}",
+                    level="ERROR",
+                )
 
         threads = [
             threading.Thread(target=init_camera, args=(i, config), daemon=True)

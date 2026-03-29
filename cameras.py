@@ -110,7 +110,9 @@ class ONVIFCameraWrapper(Camera):
                 }
             )
             rtsp_url = stream.Uri
-            self.rtsp_url = rtsp_url.replace("rtsp://", f"rtsp://{username}:{password}@")
+            self.rtsp_url = rtsp_url.replace(
+                "rtsp://", f"rtsp://{username}:{password}@"
+            )
             self.init_capture()
         except Exception as e:
             self._init_failed = True
@@ -135,11 +137,11 @@ class ONVIFCameraWrapper(Camera):
             raise ConnectionError(f"No frames received for >{_NO_FRAME_TIMEOUT}s")
         return self.last_frame_time, frame
 
-    def get_last_frame(self) -> tuple[float, cv.Mat]:
+    def get_last_frame(self) -> tuple[float, cv.Mat | None]:
         if self.last_frame is not None and (time.time() - self.last_frame_time) < 5:
             return self.last_frame_time, self.last_frame
         else:
-            return self.get_frame()
+            return time.time(), None
 
     def reboot(self) -> bool:
         # ONVIF does not have a standard reboot command; restart the capture thread

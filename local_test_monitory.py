@@ -14,7 +14,7 @@ def run(*monitors: CameraMonitor, poll_interval: float):
         _, frame = mon.camera.get_last_frame()
         if frame is not None:
             for b in boxes:
-                x, y, w, h = b.bbox
+                x, y, w, h = b.x, b.y, b.width, b.height
                 cv.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 cv.putText(
                     frame,
