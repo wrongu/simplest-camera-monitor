@@ -7,7 +7,7 @@ from typing import Optional, Callable
 import cv2 as cv
 import numpy as np
 
-from background_model import TimestampAwareBackgroundSubtractor, ForegroundBlob
+from background_model import TimestampAwareBackgroundSubtractor, BoundingBox
 from cameras import Camera
 from classifier import featurize
 from image_loader import (
@@ -27,6 +27,10 @@ class State(Enum):
     REBOOT = 3
 
 
+OnStateTransitionCallback = Callable[["CameraMonitor", State], None]
+OnDetectionCallback = Callable[["CameraMonitor", State], None]
+
+
 class CameraMonitor(object):
     def __init__(
         self,
@@ -40,8 +44,8 @@ class CameraMonitor(object):
         output_dir: Optional[Path | str] = None,
         log_lifespan: int = ONE_DAY_SECONDS,
         log=None,
-        on_state_transition: Optional[Callable[["CameraMonitor", State], None]] = None,
-        on_detection: Optional[Callable[["CameraMonitor", list[str]], None]] = None,
+        on_state_transition: Optional[OnStateTransitionCallback] = None,
+        on_detection: Optional[OnDetectionCallback] = None,
     ):
         self.camera = camera
         self.name = name
@@ -61,7 +65,7 @@ class CameraMonitor(object):
 
         self.save_blobs = save_blobs
         self.bg_model = bg_model
-        self.last_blobs = []
+        self.last_timestamp = 0
 
         self.output_dir = output_dir
         if self.output_dir is not None:
@@ -101,7 +105,7 @@ class CameraMonitor(object):
         if self.state_machine == State.RUNNING:
             try:
                 timestamp, frame = self.camera.get_frame()
-                if frame is not None:
+                if frame is not None and timestamp > self.last_timestamp:
                     foreground_objects = self.process_frame(
                         frame,
                         timestamp=timestamp,
@@ -118,9 +122,7 @@ class CameraMonitor(object):
                 try:
                     timestamp, frame = self.camera.get_frame()
                     self.state_transition(State.RUNNING, since=time.time())
-                    self.last_blobs = self.process_frame(
-                        frame, timestamp=timestamp, detect_stuff=False
-                    )
+                    self.process_frame(frame, timestamp=timestamp, detect_stuff=False)
                 except ConnectionError:
                     pass
             # After a minute, try sending a reboot signal to the camera
@@ -146,17 +148,10 @@ class CameraMonitor(object):
                     )
                     self.state_transition(State.CRASHED, since=time.time())
 
-    def handle_detections(self, detected_things: list[ForegroundBlob]):
+    def handle_detections(self, detected_things: list[BoundingBox]):
         if self.on_detection is not None:
             try:
-                self.on_detection(
-                    self,
-                    [
-                        thing.class_id
-                        for thing in detected_things
-                        if thing.class_id is not None
-                    ],
-                )
+                self.on_detection(self, detected_things)
             except Exception as e:
                 self.log(f"Error in on_detection callback: {e}", level="ERROR")
 
@@ -167,9 +162,11 @@ class CameraMonitor(object):
 
     def process_frame(
         self, frame: cv.Mat, timestamp: float, detect_stuff=True, save_blobs=True
-    ) -> list[ForegroundBlob]:
-        if timestamp is None:
-            timestamp = time.time()
+    ) -> list[BoundingBox]:
+        if timestamp <= self.last_timestamp:
+            return []
+
+        self.last_timestamp = timestamp
 
         # check if too dark
         if np.median(frame.ravel()) < self.brightness_threshold:
@@ -190,14 +187,13 @@ class CameraMonitor(object):
 
             # classify those buggers
             for i, blob in enumerate(blobs):
-                blob.class_id = "???"  # default to unknown
                 if self.classifier is not None:
                     try:
                         pred_class_int = self.classifier.predict(
                             featurize(blob)[None, :]
                         ).item()
-                        blob.class_id = self.label_lookup.get(
-                            pred_class_int, str(pred_class_int)
+                        blob.bbox.class_id = self.label_lookup.get(
+                            pred_class_int, "???"
                         )
                     except Exception as e:
                         self.log(f"Classifier error: {e}", level="ERROR")
@@ -216,11 +212,11 @@ class CameraMonitor(object):
                         self.output_dir
                         / "blobs"
                         / create_timestamped_filename(
-                            timestamp, f"_{i}_{blob.class_id}.jpg"
+                            timestamp, f"_{i}_{blob.bbox.class_id}.jpg"
                         ),
                         blob_img,
                     )
-            return blobs
+            return [blob.bbox for blob in blobs]
 
     def reinitialize_bg_model_from_saved_images(self, now=None):
         self.log("Reinitializing background model from saved images...")

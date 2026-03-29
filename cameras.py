@@ -29,6 +29,8 @@ class VideoStreamBackgroundThread(threading.Thread):
             ret, f = self.cap.read()
             if ret:
                 self.frame = f
+            else:
+                self.frame = None
 
     def stop(self):
         self.running = False
@@ -83,13 +85,15 @@ class ONVIFCameraWrapper(Camera):
         self.last_frame_time = 0
 
     def init_capture(self):
+        if self.stream is not None:
+            self.stream.stop()
         self.stream = VideoStreamBackgroundThread(self.rtsp_url)
         self.stream.daemon = True
         self.stream.start()
 
     def get_frame(self) -> tuple[float, cv.Mat]:
         frame = self.stream.frame
-        if frame is not None:
+        if frame is not None and not np.all(frame == self.last_frame):
             self.last_frame = frame
             self.last_frame_time = time.time()
         return self.last_frame_time, frame

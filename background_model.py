@@ -98,7 +98,6 @@ class ForegroundBlob:
     image: cv.Mat
     background: cv.Mat
     mask: cv.Mat
-    class_id: Optional[str] = None
 
     def shadow_correlation(self) -> tuple[float, float, float]:
         bg_bgr = self.background[self.mask > 0]
