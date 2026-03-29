@@ -17,24 +17,50 @@ class Camera(Protocol):
     def reboot(self) -> bool: ...
 
 
+_RECONNECT_AFTER_FAILURES = 10
+_BACKOFF_INITIAL = 0.5
+_BACKOFF_MAX = 30.0
+
+
 class VideoStreamBackgroundThread(threading.Thread):
     def __init__(self, url):
         super().__init__()
+        self.url = url
         self.cap = cv.VideoCapture(url)
         self.frame = None
+        self._frame_lock = threading.Lock()
         self.running = True
+        self._consecutive_failures = 0
 
     def run(self):
+        backoff = _BACKOFF_INITIAL
         while self.running:
             ret, f = self.cap.read()
             if ret:
-                self.frame = f
+                with self._frame_lock:
+                    self.frame = f
+                self._consecutive_failures = 0
+                backoff = _BACKOFF_INITIAL
             else:
-                self.frame = None
+                with self._frame_lock:
+                    self.frame = None
+                self._consecutive_failures += 1
+                time.sleep(min(backoff, _BACKOFF_MAX))
+                backoff = min(backoff * 2, _BACKOFF_MAX)
+                if self._consecutive_failures % _RECONNECT_AFTER_FAILURES == 0:
+                    self.cap.release()
+                    self.cap = cv.VideoCapture(self.url)
+
+    def is_open(self):
+        return self.cap is not None and self.cap.isOpened()
 
     def stop(self):
         self.running = False
+        self.join(timeout=2)
         self.cap.release()
+
+
+_NO_FRAME_TIMEOUT = 10.0
 
 
 class ONVIFCameraWrapper(Camera):
@@ -52,37 +78,43 @@ class ONVIFCameraWrapper(Camera):
         self._password = password
         resolution = tuple(resolution)
         self._resolution = resolution
-        self.cam = ONVIFCamera(host, port, username, password)
-        self.media = self.cam.create_media_service()
-        profiles = self.media.GetProfiles()
-        if not profiles:
-            raise ValueError("No media profiles found on camera")
-        available_resolutions = []
-        for profile in profiles:
-            res = profile.VideoEncoderConfiguration.Resolution
-            available_resolutions.append((res.Width, res.Height))
-        try:
-            i_profile = available_resolutions.index(resolution)
-            self.profile = profiles[i_profile]
-        except ValueError:
-            raise ValueError(
-                f"Requested resolution {resolution} not available. Available: {available_resolutions}"
-            )
-        stream = self.media.GetStreamUri(
-            {
-                "StreamSetup": {
-                    "Stream": "RTP-Unicast",
-                    "Transport": {"Protocol": "RTSP"},
-                },
-                "ProfileToken": self.profile.token,
-            }
-        )
-        rtsp_url = stream.Uri
-        self.rtsp_url = rtsp_url.replace("rtsp://", f"rtsp://{username}:{password}@")
         self.stream = None
-        self.init_capture()
         self.last_frame = None
-        self.last_frame_time = 0
+        self.last_frame_time = time.time()  # seed so timeout starts from init
+        self._init_failed = False
+
+        try:
+            self.cam = ONVIFCamera(host, port, username, password)
+            self.media = self.cam.create_media_service()
+            profiles = self.media.GetProfiles()
+            if not profiles:
+                raise ValueError("No media profiles found on camera")
+            available_resolutions = []
+            for profile in profiles:
+                res = profile.VideoEncoderConfiguration.Resolution
+                available_resolutions.append((res.Width, res.Height))
+            try:
+                i_profile = available_resolutions.index(resolution)
+                self.profile = profiles[i_profile]
+            except ValueError:
+                raise ValueError(
+                    f"Requested resolution {resolution} not available. Available: {available_resolutions}"
+                )
+            stream = self.media.GetStreamUri(
+                {
+                    "StreamSetup": {
+                        "Stream": "RTP-Unicast",
+                        "Transport": {"Protocol": "RTSP"},
+                    },
+                    "ProfileToken": self.profile.token,
+                }
+            )
+            rtsp_url = stream.Uri
+            self.rtsp_url = rtsp_url.replace("rtsp://", f"rtsp://{username}:{password}@")
+            self.init_capture()
+        except Exception as e:
+            self._init_failed = True
+            self._init_error = e
 
     def init_capture(self):
         if self.stream is not None:
@@ -92,10 +124,15 @@ class ONVIFCameraWrapper(Camera):
         self.stream.start()
 
     def get_frame(self) -> tuple[float, cv.Mat]:
-        frame = self.stream.frame
+        if self._init_failed:
+            raise ConnectionError(f"Camera init failed: {self._init_error}")
+        with self.stream._frame_lock:
+            frame = self.stream.frame
         if frame is not None and not np.all(frame == self.last_frame):
             self.last_frame = frame
             self.last_frame_time = time.time()
+        elif frame is None and time.time() - self.last_frame_time > _NO_FRAME_TIMEOUT:
+            raise ConnectionError(f"No frames received for >{_NO_FRAME_TIMEOUT}s")
         return self.last_frame_time, frame
 
     def get_last_frame(self) -> tuple[float, cv.Mat]:
@@ -105,9 +142,9 @@ class ONVIFCameraWrapper(Camera):
             return self.get_frame()
 
     def reboot(self) -> bool:
-        # ONVIF does not have a standard reboot command; this is a placeholder
+        # ONVIF does not have a standard reboot command; restart the capture thread
         self.init_capture()
-        return self.stream.isOpened()
+        return True
 
 
 class ESPHomeCameraWrapper(Camera):

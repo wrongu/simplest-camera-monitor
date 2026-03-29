@@ -148,6 +148,16 @@ class CameraMonitor(object):
                     )
                     self.state_transition(State.CRASHED, since=time.time())
 
+        elif self.state_machine == State.CRASHED:
+            # Retry every 5 minutes in case the camera eventually recovers
+            if time.time() - self.state_meta.get("since", 0) > 300:
+                self.log("Retrying crashed camera...")
+                if self.camera.reboot():
+                    self.state_transition(State.REBOOT, since=time.time())
+                else:
+                    self.log("Retry failed, staying in CRASHED", level="WARNING")
+                    self.state_meta["since"] = time.time()
+
     def handle_detections(self, detected_things: list[BoundingBox]):
         if self.on_detection is not None:
             try:
