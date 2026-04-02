@@ -9,4 +9,4 @@ arch:
   - amd64
 map:
   - config:ro # read /config/camera_monitor.yaml
-  - share:rw # camera image logs (output_dir)
+  - media:rw # camera image logs (output_dir)

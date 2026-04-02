@@ -1,0 +1,27 @@
+---
+cameras:
+  - name: "MyCamera"
+    url: !secret cam_url # RTSP URL of the camera stream
+    port: !secret cam_port # RTSP port
+    username: !secret cam_user # Username for camera authentication
+    password: !secret cam_pass # Password for camera authentication
+    resolution: [1280, 720] # Desired resolution for processing (width, height); options determined by the camera itself
+    output_dir: "/media/mycamera" # Directory to save captured images and logs
+    region_of_interest: "/media/mycamera/roi.png" # Optional path to a binary mask image defining the region of interest (white areas are processed, black areas are ignored)
+    brightness_threshold: 10.0 # Minimum average brightness to consider the frame valid for motion detection (helps avoid false positives in very dark conditions)
+    history_seconds: 300.0 #  Effective length of the background-subtraction model's history in seconds (e.g., 300 for 5 minutes)
+    var_threshold: 25.0 # Threshold parameter passed to the MOG2 background subtractor (higher values make it less sensitive to small movements)
+    night_var_threshold: 8.0 # Any parameter prefixed with night_ is applied only during nighttime conditions
+    detect_shadows: true # Whether to enable shadow detection in the background subtraction algorithm (can help reduce false positives but may also miss some motion)
+    night_detect_shadows: false # Disable shadow detection at night to improve sensitivity in low-light conditions
+    area_threshold: 1000 # Minimum contour area in pixels to be considered a valid motion event (helps filter out small movements like leaves or noise)
+    shadow_correlation_threshold: 0.5 # Threshold in [0, 1] used to determine if a blob is a shadow. A lower value makes it more likely to classify a blob as a shadow, while a higher value makes it less likely.
+    morph_radius: 5 # Radius for morphological operations (e.g., dilation) applied to the foreground mask to help connect fragmented blobs and reduce noise
+    morph_thresh: 0.3 # Threshold in [0, 1] for the morphological cleanup
+    morph_iters: 3 # Number of morphological cleanup iterations
+    save_blobs: False # Whether to also save the binary foreground mask of detected motion blobs
+    model_file: null # If specified, path to a .pkl file containing a sklearn model.
+    log_lifespan: 43200.0 # Lifespan of log entries in seconds (e.g., 43200 for 12 hours); older images will automatically be cleaned up to save space.
+poll_frequency: 5.0 # Time in seconds between each poll of the camera stream for motion detection (e.g., 5.0 for every 5 seconds)
+watch_for_class: # List of object classes as strings to trigger. Only valid if there is a model file.
+  - person

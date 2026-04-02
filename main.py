@@ -1,13 +1,3 @@
-"""
-Standalone entry point for the camera monitor HA Add-on.
-Replaces app.py (AppDaemon) with a plain Python process that talks to HA
-via the Supervisor REST API.
-
-Config is read from /config/camera_monitor.yaml.
-HA state updates use the SUPERVISOR_TOKEN environment variable injected
-by the HA Supervisor when homeassistant_api: true is set in config.yaml.
-"""
-
 import logging
 import os
 import threading
@@ -39,7 +29,7 @@ logger = logging.getLogger("camera_monitor")
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 HA_API = "http://supervisor/core/api"
 
-# Local state cache for deduplication (replaces AppDaemon's entity.state reads)
+# Local HA entity state cache for deduplication
 _sensor_states: dict[str, str] = {}
 
 

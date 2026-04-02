@@ -3,5 +3,5 @@ data/
 .idea/
 *.DS_Store
 *.pyc
-secrets.yaml
 .claude/
+local/
