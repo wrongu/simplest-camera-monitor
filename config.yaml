@@ -6,6 +6,7 @@ init: false
 homeassistant_api: true
 arch:
   - aarch64
+  - amd64
 map:
-  - config:ro   # read /config/camera_monitor.yaml
-  - share:rw    # camera image logs (output_dir)
+  - config:ro # read /config/camera_monitor.yaml
+  - share:rw # camera image logs (output_dir)
