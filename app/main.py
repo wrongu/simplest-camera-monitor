@@ -8,9 +8,14 @@ import cv2 as cv
 import requests
 import yaml
 from background_model import TimestampAwareBackgroundSubtractor, BoundingBox
-from camera_monitor import CameraMonitor, State, OnDetectionCallback, OnStateTransitionCallback
+from camera_monitor import (
+    CameraMonitor,
+    State,
+    OnDetectionCallback,
+    OnStateTransitionCallback,
+)
 from cameras import ONVIFCameraWrapper
-from typing import Callable
+from typing import Callable, Optional
 
 ONE_DAY_SECONDS = 24 * 60 * 60
 
@@ -27,31 +32,76 @@ logger = logging.getLogger("camera_monitor")
 # HA REST API helpers
 # ---------------------------------------------------------------------------
 
-SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
-HA_API = "http://supervisor/core/api"
 
-# Local HA entity state cache for deduplication
-_sensor_states: dict[str, str] = {}
+class HomeAssistantClient:
+    def __init__(
+        self,
+        binary_sensors: list[str] = [],
+        token: Optional[str] = None,
+        api_url: str = "http://supervisor/core/api",
+    ):
+        if token is None:
+            self.token = os.environ.get("SUPERVISOR_TOKEN", None)
+        else:
+            self.token = token
 
+        if not self.token:
+            logger.warning(
+                "SUPERVISOR_TOKEN not set — HA state updates will fail. "
+                "Ensure homeassistant_api: true in the add-on config.yaml."
+            )
 
-def set_ha_state(entity_id: str, state: str) -> None:
-    if _sensor_states.get(entity_id) == state:
-        return
-    try:
-        resp = requests.post(
-            f"{HA_API}/states/{entity_id}",
-            headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}"},
-            json={"state": state},
-            timeout=5,
-        )
-        resp.raise_for_status()
-        _sensor_states[entity_id] = state
-    except Exception as e:
-        logger.error(f"Failed to set HA state {entity_id}={state}: {e}")
+        self.api_url = api_url
+        self._binary_sensors = {
+            name.lower().replace(" ", "_"): {
+                "state": "off",
+                "attributes": {"friendly_name": name},
+            }
+            for name in binary_sensors
+        }
+        self.sync_states()
 
+    def add_binary_sensor(self, name: str) -> None:
+        entity_id = name.lower().replace(" ", "_")
+        if entity_id in self._binary_sensors:
+            return
+        self._binary_sensors[entity_id] = {
+            "state": "off",
+            "attributes": {"friendly_name": name},
+        }
 
-def get_ha_state(entity_id: str) -> str | None:
-    return _sensor_states.get(entity_id)
+    def sync_states(self) -> None:
+        if self.token is None:
+            return
+        try:
+            for entity_id, data in self._binary_sensors.items():
+                resp = requests.get(
+                    f"{self.api_url}/states/binary_sensor.{entity_id}",
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    timeout=5,
+                )
+                resp.raise_for_status()
+                self._binary_sensors[entity_id]["state"] = data["state"]
+        except Exception as e:
+            logger.error(f"Failed to sync HA states: {e}")
+
+    def set_state(self, name: str, state: str) -> None:
+        entity_id = name.lower().replace(" ", "_")
+        if self.token is None:
+            return
+        if self._binary_sensors.get(entity_id, {}).get("state") == state:
+            return
+        try:
+            resp = requests.post(
+                f"{self.api_url}/states/{entity_id}",
+                headers={"Authorization": f"Bearer {self.token}"},
+                json={"state": state},
+                timeout=5,
+            )
+            resp.raise_for_status()
+            self._binary_sensors[entity_id]["state"] = state
+        except Exception as e:
+            logger.error(f"Failed to set HA state {entity_id}={state}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +111,7 @@ def get_ha_state(entity_id: str) -> str | None:
 
 def make_log(name: str):
     """Return a log callable with the same signature as AppDaemon's self.log."""
+    # TODO - just change the CameraMonitor log signature to match logging.Logger and skip this adapter step
     log = logging.getLogger(name)
     level_map = {
         "DEBUG": logging.DEBUG,
@@ -82,31 +133,33 @@ def make_log(name: str):
 # ---------------------------------------------------------------------------
 
 
-def make_handle_state_transition(trigger_classes: list[str]) -> OnStateTransitionCallback:
+def make_handle_state_transition(
+    client: HomeAssistantClient, sensor_names: list[str]
+) -> OnStateTransitionCallback:
     def handle_state_transition(monitor: CameraMonitor, new_state: State):
-        if new_state in (State.CANT_CONNECT, State.CRASHED, State.REBOOT):
-            for cls in trigger_classes:
-                set_ha_state(f"binary_sensor.{monitor.name}_{cls}", "unavailable")
-        elif new_state == State.RUNNING:
-            for cls in trigger_classes:
-                set_ha_state(f"binary_sensor.{monitor.name}_{cls}", "available")
+        for name in sensor_names:
+            friendly_name = f"{monitor.name} {name} detector"
+            client.add_binary_sensor(friendly_name)
+            if new_state in (State.CANT_CONNECT, State.CRASHED, State.REBOOT):
+                client.set_state(friendly_name, "unavailable")
+            elif new_state == State.RUNNING:
+                client.set_state(friendly_name, "available")
 
     return handle_state_transition
 
 
-def make_handle_detections(trigger_classes: list[str], log) -> OnDetectionCallback:
+def make_handle_detections(
+    client: HomeAssistantClient, trigger_classes: list[str], log
+) -> OnDetectionCallback:
     def handle_detections(monitor: CameraMonitor, detections: list[BoundingBox]):
         detected_classes = {d.class_id for d in detections}
-        for cls in trigger_classes:
-            entity_id = f"binary_sensor.{monitor.name}_{cls}"
-            if cls in detected_classes:
-                if get_ha_state(entity_id) != "on":
-                    log(f"DETECTED {cls}", level="WARNING")
-                    set_ha_state(entity_id, "on")
+        for name in trigger_classes:
+            friendly_name = f"{monitor.name} {name} detector"
+            client.add_binary_sensor(friendly_name)
+            if name in detected_classes:
+                client.set_state(friendly_name, "on")
             else:
-                if get_ha_state(entity_id) != "off":
-                    log(f"DEACTIVATED {cls}", level="INFO")
-                    set_ha_state(entity_id, "off")
+                client.set_state(friendly_name, "off")
 
     return handle_detections
 
@@ -116,7 +169,7 @@ def make_handle_detections(trigger_classes: list[str], log) -> OnDetectionCallba
 # ---------------------------------------------------------------------------
 
 
-def init_monitors(config: dict) -> list[CameraMonitor]:
+def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonitor]:
     trigger_classes = config.get("watch_for_class", [])
     poll_frequency = config["poll_frequency"]
     monitor_slots: list[CameraMonitor | None] = [None] * len(config["cameras"])
@@ -125,7 +178,9 @@ def init_monitors(config: dict) -> list[CameraMonitor]:
         cam_name = cam_config.get("name", str(i))
         media_dir = Path("/media") / cam_name.lower().replace(" ", "_")
         roi_path = media_dir / "roi.png"
-        roi = cv.imread(str(roi_path), cv.IMREAD_GRAYSCALE) if roi_path.exists() else None
+        roi = (
+            cv.imread(str(roi_path), cv.IMREAD_GRAYSCALE) if roi_path.exists() else None
+        )
         log = make_log(f"camera_monitor.{cam_name}")
         try:
             mon = CameraMonitor(
@@ -163,9 +218,9 @@ def init_monitors(config: dict) -> list[CameraMonitor]:
                 output_dir=media_dir,
                 log_lifespan=cam_config.get("log_lifespan", ONE_DAY_SECONDS / 2),
                 log=log,
-                on_state_transition=make_handle_state_transition(trigger_classes),
+                on_state_transition=make_handle_state_transition(client, trigger_classes),
                 on_detection=make_handle_detections(
-                    trigger_classes, make_log(f"camera_monitor.{cam_name}")
+                    client, trigger_classes, make_log(f"camera_monitor.{cam_name}")
                 ),
             )
             monitor_slots[i] = mon
@@ -198,7 +253,7 @@ def poll_loop(monitors: list[CameraMonitor], interval: float) -> None:
 
 def cleanup_loop(monitors: list[CameraMonitor]) -> None:
     while True:
-        time.sleep(ONE_DAY_SECONDS / 6)
+        time.sleep(ONE_DAY_SECONDS / 24)  # Run cleanup every hour
         for monitor in monitors:
             monitor.cleanup_files()
 
@@ -213,13 +268,16 @@ def main():
     with open(CONFIG_PATH) as f:
         config = yaml.safe_load(f)
 
-    if not SUPERVISOR_TOKEN:
-        logger.warning(
-            "SUPERVISOR_TOKEN not set — HA state updates will fail. "
-            "Ensure homeassistant_api: true in the add-on config.yaml."
-        )
+    # Connect a client
+    client = HomeAssistantClient(
+        binary_sensors=[
+            f"{cam['name']} {c} detector"
+            for cam in config["cameras"]
+            for c in config.get("watch_for_class", [])
+        ]
+    )
 
-    monitors = init_monitors(config)
+    monitors = init_monitors(config, client)
     if not monitors:
         logger.error("No cameras initialized. Exiting.")
         return
@@ -245,5 +303,4 @@ def main():
 
 
 if __name__ == "__main__":
-    print("Here we go!")
     main()
