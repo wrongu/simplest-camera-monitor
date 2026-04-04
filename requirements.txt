@@ -1,6 +1,4 @@
 numpy
 onvif_zeep
-opencv-contrib-python-headless
 pyyaml
 requests
-scikit-learn
