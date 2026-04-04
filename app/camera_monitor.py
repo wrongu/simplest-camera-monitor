@@ -28,7 +28,7 @@ class State(Enum):
 
 
 OnStateTransitionCallback = Callable[["CameraMonitor", State], None]
-OnDetectionCallback = Callable[["CameraMonitor", State], None]
+OnDetectionCallback = Callable[["CameraMonitor", list[BoundingBox]], None]
 
 
 class CameraMonitor(object):

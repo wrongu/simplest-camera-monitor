@@ -7,13 +7,14 @@ from pathlib import Path
 import cv2 as cv
 import requests
 import yaml
-from background_model import TimestampAwareBackgroundSubtractor
-from camera_monitor import CameraMonitor, State
+from background_model import TimestampAwareBackgroundSubtractor, BoundingBox
+from camera_monitor import CameraMonitor, State, OnDetectionCallback, OnStateTransitionCallback
 from cameras import ONVIFCameraWrapper
+from typing import Callable
 
 ONE_DAY_SECONDS = 24 * 60 * 60
 
-CONFIG_PATH = Path("/config/camera_monitor.yaml")
+CONFIG_PATH = Path("/config/config.yaml")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,7 +82,7 @@ def make_log(name: str):
 # ---------------------------------------------------------------------------
 
 
-def make_handle_state_transition(trigger_classes: list[str]):
+def make_handle_state_transition(trigger_classes: list[str]) -> OnStateTransitionCallback:
     def handle_state_transition(monitor: CameraMonitor, new_state: State):
         if new_state in (State.CANT_CONNECT, State.CRASHED, State.REBOOT):
             for cls in trigger_classes:
@@ -93,11 +94,12 @@ def make_handle_state_transition(trigger_classes: list[str]):
     return handle_state_transition
 
 
-def make_handle_detections(trigger_classes: list[str], log):
-    def handle_detections(monitor: CameraMonitor, detections: list[str]):
+def make_handle_detections(trigger_classes: list[str], log) -> OnDetectionCallback:
+    def handle_detections(monitor: CameraMonitor, detections: list[BoundingBox]):
+        detected_classes = {d.class_id for d in detections}
         for cls in trigger_classes:
             entity_id = f"binary_sensor.{monitor.name}_{cls}"
-            if cls in detections:
+            if cls in detected_classes:
                 if get_ha_state(entity_id) != "on":
                     log(f"DETECTED {cls}", level="WARNING")
                     set_ha_state(entity_id, "on")
@@ -121,6 +123,9 @@ def init_monitors(config: dict) -> list[CameraMonitor]:
 
     def init_camera(i, cam_config):
         cam_name = cam_config.get("name", str(i))
+        media_dir = Path("/media") / cam_name.lower().replace(" ", "_")
+        roi_path = media_dir / "roi.png"
+        roi = cv.imread(str(roi_path), cv.IMREAD_GRAYSCALE) if roi_path.exists() else None
         log = make_log(f"camera_monitor.{cam_name}")
         try:
             mon = CameraMonitor(
@@ -146,9 +151,7 @@ def init_monitors(config: dict) -> list[CameraMonitor]:
                     morph_thresh=cam_config["morph_thresh"],
                     morph_iters=cam_config["morph_iters"],
                     default_fps=1 / poll_frequency,
-                    region_of_interest=cv.imread(
-                        cam_config["region_of_interest"], cv.IMREAD_GRAYSCALE
-                    ),
+                    region_of_interest=roi,
                     night_mode_kwargs={
                         k[6:]: v
                         for k, v in cam_config.items()
@@ -157,7 +160,7 @@ def init_monitors(config: dict) -> list[CameraMonitor]:
                 ),
                 save_blobs=cam_config.get("save_blobs", True),
                 model_file=cam_config.get("model_file", None),
-                output_dir=cam_config["output_dir"],
+                output_dir=media_dir,
                 log_lifespan=cam_config.get("log_lifespan", ONE_DAY_SECONDS / 2),
                 log=log,
                 on_state_transition=make_handle_state_transition(trigger_classes),
@@ -242,4 +245,5 @@ def main():
 
 
 if __name__ == "__main__":
+    print("Here we go!")
     main()
