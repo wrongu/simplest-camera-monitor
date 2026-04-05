@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Callable
 
-from app.utils import LogHandler
+from utils import LogHandler
 import cv2 as cv
 import numpy as np
 
@@ -17,7 +17,6 @@ from image_loader import (
     get_all_timestamped_files_sorted,
     ensure_files_timestamp_named,
 )
-from functools import lru_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,7 +68,7 @@ class CameraMonitor(object):
         else:
             self.classifier = None
             self.label_lookup = {}
-            log_once(logging.WARNING, "No model file provided, classifier disabled.")
+            logger.log(logging.WARNING, "No model file provided, classifier disabled.")
 
         self.save_blobs = save_blobs
         self.bg_model = bg_model
@@ -106,7 +105,7 @@ class CameraMonitor(object):
                 try:
                     self.on_state_transition(self, new_state)
                 except Exception as e:
-                    log_once(logging.ERROR, f"Error in on_state_transition: {e}")
+                    logger.log(logging.ERROR, f"Error in on_state_transition: {e}")
 
     def poll(self):
         if self.state_machine == State.RUNNING:
@@ -139,7 +138,7 @@ class CameraMonitor(object):
                     logger.log(logging.INFO, "Reboot request sent successfully")
                     self.state_transition(State.REBOOT, since=time.time())
                 else:
-                    log_once(logging.WARNING, "Failed to send reboot request")
+                    logger.log(logging.WARNING, "Failed to send reboot request")
                     self.state_transition(State.CRASHED, since=time.time())
 
         elif self.state_machine == State.REBOOT:
@@ -150,9 +149,7 @@ class CameraMonitor(object):
                     self.state_transition(State.RUNNING, since=time.time())
                     self.process_frame(frame, timestamp=timestamp, detect_stuff=False)
                 except ConnectionError:
-                    log_once(
-                        logging.WARNING, "Still cannot connect after reboot attempt"
-                    )
+                    logger.log(logging.WARNING, "Still cannot connect after reboot attempt")
                     self.state_transition(State.CRASHED, since=time.time())
 
         elif self.state_machine == State.CRASHED:
@@ -162,7 +159,7 @@ class CameraMonitor(object):
                 if self.camera.reboot():
                     self.state_transition(State.REBOOT, since=time.time())
                 else:
-                    log_once(logging.WARNING, "Retry failed, staying in CRASHED")
+                    logger.log(logging.WARNING, "Retry failed, staying in CRASHED")
                     self.state_meta["since"] = time.time()
 
     def handle_detections(self, detected_things: list[BoundingBox]):
@@ -170,7 +167,7 @@ class CameraMonitor(object):
             try:
                 self.on_detection(self, detected_things)
             except Exception as e:
-                log_once(logging.ERROR, f"Error in on_detection callback: {e}")
+                logger.log(logging.ERROR, f"Error in on_detection callback: {e}")
 
     @staticmethod
     def _save_image(path: Path, image: cv.Mat):
@@ -213,7 +210,7 @@ class CameraMonitor(object):
                             pred_class_int, "???"
                         )
                     except Exception as e:
-                        log_once(logging.ERROR, f"Classifier error: {e}")
+                        logger.log(logging.ERROR, f"Classifier error: {e}")
 
                 # Debugging: write out some images containing blob info
                 if save_blobs and self.output_dir is not None:
@@ -237,9 +234,7 @@ class CameraMonitor(object):
 
     def reinitialize_bg_model_from_saved_images(self, now=None):
         if self.output_dir is None:
-            log_once(
-                logging.WARNING, "No output directory set, cannot reinitialize bg model"
-            )
+            logger.log(logging.WARNING, "No output directory set, cannot reinitialize bg model")
             return
         logger.log(logging.INFO, "Reinitializing background model from saved images...")
         if now is None:
@@ -256,9 +251,7 @@ class CameraMonitor(object):
 
     def cleanup_files(self):
         if self.output_dir is None:
-            log_once(
-                logging.WARNING, "No output directory set, cannot reinitialize bg model"
-            )
+            logger.log(logging.WARNING, "No output directory set, cannot reinitialize bg model")
             return
         logger.log(logging.INFO, "Starting cleanup")
         now = time.time()
