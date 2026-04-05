@@ -1,6 +1,6 @@
 name: "Camera Monitor"
 description: "ONVIF camera motion detection and object classification"
-version: "1.0.0"
+version: "1.0.1"
 slug: "camera_monitor"
 init: false
 homeassistant_api: true
