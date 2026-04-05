@@ -151,7 +151,7 @@ def make_handle_state_transition(
 
 
 def make_handle_detections(
-    client: HomeAssistantClient, trigger_classes: list[str], log
+    client: HomeAssistantClient, trigger_classes: list[str]
 ) -> OnDetectionCallback:
     def handle_detections(monitor: CameraMonitor, detections: list[BoundingBox]):
         detected_classes = {d.class_id for d in detections}
@@ -219,12 +219,11 @@ def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonit
                 model_file=cam_config.get("model_file", None),
                 output_dir=media_dir,
                 log_lifespan=cam_config.get("log_lifespan", ONE_DAY_SECONDS / 2),
-                log=log,
                 on_state_transition=make_handle_state_transition(
                     client, trigger_classes
                 ),
                 on_detection=make_handle_detections(
-                    client, trigger_classes, make_log(f"camera_monitor.{cam_name}")
+                    client, trigger_classes
                 ),
             )
             monitor_slots[i] = mon
