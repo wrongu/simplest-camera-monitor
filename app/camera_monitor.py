@@ -1,9 +1,11 @@
+import logging
 import pickle
 import time
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Callable
 
+from app.utils import LogHandler
 import cv2 as cv
 import numpy as np
 
@@ -15,6 +17,14 @@ from image_loader import (
     get_all_timestamped_files_sorted,
     ensure_files_timestamp_named,
 )
+from functools import lru_cache
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("camera_monitor")
+logger.addHandler(LogHandler(batch_every=30 * 60))
 
 ONE_DAY_SECONDS = 24 * 60 * 60
 
@@ -43,13 +53,11 @@ class CameraMonitor(object):
         model_file: Optional[Path | str] = None,
         output_dir: Optional[Path | str] = None,
         log_lifespan: int = ONE_DAY_SECONDS,
-        log=None,
         on_state_transition: Optional[OnStateTransitionCallback] = None,
         on_detection: Optional[OnDetectionCallback] = None,
     ):
         self.camera = camera
         self.name = name
-        self.log = log or (lambda msg, level="INFO": print(f"[{level}] {msg}"))
         self.brightness_threshold = int(brightness_threshold)
         self.history_seconds = float(history_seconds)
         if model_file is not None:
@@ -57,19 +65,18 @@ class CameraMonitor(object):
                 model_metadata = pickle.load(f)
             self.classifier = model_metadata["model"]
             self.label_lookup: dict[int, str] = model_metadata["label_lookup"]
-            self.log(f"Loaded model with labels: {self.label_lookup}")
+            logger.log(logging.INFO, f"Loaded model with labels: {self.label_lookup}")
         else:
             self.classifier = None
             self.label_lookup = {}
-            self.log("No model file provided, classifier disabled.", level="WARNING")
+            log_once(logging.WARNING, "No model file provided, classifier disabled.")
 
         self.save_blobs = save_blobs
         self.bg_model = bg_model
         self.last_timestamp = 0
 
-        self.output_dir = output_dir
+        self.output_dir = Path(output_dir) if output_dir is not None else None
         if self.output_dir is not None:
-            self.output_dir = Path(output_dir)
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self.reinitialize_bg_model_from_saved_images()
         self.log_lifespan = log_lifespan
@@ -91,7 +98,7 @@ class CameraMonitor(object):
     def state_transition(self, new_state: State, **meta):
         old_state = self.state_machine
         if old_state != new_state:
-            self.log(f"State transition {old_state} -> {new_state}")
+            logger.log(logging.INFO, f"State transition {old_state} -> {new_state}")
             self.state_machine = new_state
             self.state_meta = meta
 
@@ -99,7 +106,7 @@ class CameraMonitor(object):
                 try:
                     self.on_state_transition(self, new_state)
                 except Exception as e:
-                    self.log(f"Error in on_state_transition: {e}", level="ERROR")
+                    log_once(logging.ERROR, f"Error in on_state_transition: {e}")
 
     def poll(self):
         if self.state_machine == State.RUNNING:
@@ -127,12 +134,12 @@ class CameraMonitor(object):
                     pass
             # After a minute, try sending a reboot signal to the camera
             else:
-                self.log("Attempting to reboot camera via HTTP request")
+                logger.log(logging.INFO, "Attempting to reboot camera via HTTP request")
                 if self.camera.reboot():
-                    self.log("Reboot request sent successfully")
+                    logger.log(logging.INFO, "Reboot request sent successfully")
                     self.state_transition(State.REBOOT, since=time.time())
                 else:
-                    self.log("Failed to send reboot request", level="WARNING")
+                    log_once(logging.WARNING, "Failed to send reboot request")
                     self.state_transition(State.CRASHED, since=time.time())
 
         elif self.state_machine == State.REBOOT:
@@ -143,19 +150,19 @@ class CameraMonitor(object):
                     self.state_transition(State.RUNNING, since=time.time())
                     self.process_frame(frame, timestamp=timestamp, detect_stuff=False)
                 except ConnectionError:
-                    self.log(
-                        "Still cannot connect after reboot attempt", level="WARNING"
+                    log_once(
+                        logging.WARNING, "Still cannot connect after reboot attempt"
                     )
                     self.state_transition(State.CRASHED, since=time.time())
 
         elif self.state_machine == State.CRASHED:
             # Retry every 5 minutes in case the camera eventually recovers
             if time.time() - self.state_meta.get("since", 0) > 300:
-                self.log("Retrying crashed camera...")
+                logger.log(logging.INFO, "Retrying crashed camera...")
                 if self.camera.reboot():
                     self.state_transition(State.REBOOT, since=time.time())
                 else:
-                    self.log("Retry failed, staying in CRASHED", level="WARNING")
+                    log_once(logging.WARNING, "Retry failed, staying in CRASHED")
                     self.state_meta["since"] = time.time()
 
     def handle_detections(self, detected_things: list[BoundingBox]):
@@ -163,7 +170,7 @@ class CameraMonitor(object):
             try:
                 self.on_detection(self, detected_things)
             except Exception as e:
-                self.log(f"Error in on_detection callback: {e}", level="ERROR")
+                log_once(logging.ERROR, f"Error in on_detection callback: {e}")
 
     @staticmethod
     def _save_image(path: Path, image: cv.Mat):
@@ -206,7 +213,7 @@ class CameraMonitor(object):
                             pred_class_int, "???"
                         )
                     except Exception as e:
-                        self.log(f"Classifier error: {e}", level="ERROR")
+                        log_once(logging.ERROR, f"Classifier error: {e}")
 
                 # Debugging: write out some images containing blob info
                 if save_blobs and self.output_dir is not None:
@@ -229,7 +236,12 @@ class CameraMonitor(object):
             return [blob.bbox for blob in blobs]
 
     def reinitialize_bg_model_from_saved_images(self, now=None):
-        self.log("Reinitializing background model from saved images...")
+        if self.output_dir is None:
+            log_once(
+                logging.WARNING, "No output directory set, cannot reinitialize bg model"
+            )
+            return
+        logger.log(logging.INFO, "Reinitializing background model from saved images...")
         if now is None:
             now = time.time()
         for t, f in get_all_timestamped_files_sorted(
@@ -238,12 +250,17 @@ class CameraMonitor(object):
             if 0 < (now - t) < self.history_seconds:
                 frame = cv.imread(str(f))
                 if frame is not None:
-                    self.log(f"\t{f}")
+                    logger.log(logging.INFO, f"\t{f}")
                     self.process_frame(frame, timestamp=t, detect_stuff=False)
-        self.log("Reinitialization complete.")
+        logger.log(logging.INFO, "Reinitialization complete.")
 
     def cleanup_files(self):
-        self.log("Starting cleanup")
+        if self.output_dir is None:
+            log_once(
+                logging.WARNING, "No output directory set, cannot reinitialize bg model"
+            )
+            return
+        logger.log(logging.INFO, "Starting cleanup")
         now = time.time()
 
         # Check that all logged filenames are appropriately timestamped
@@ -257,7 +274,7 @@ class CameraMonitor(object):
             if now - t > self.log_lifespan:
                 f.unlink()
                 n_images_deleted += 1
-        self.log(f"Deleted {n_images_deleted} old images")
+        logger.log(logging.INFO, f"Deleted {n_images_deleted} old images")
 
         n_blobs_deleted = 0
         for t, f in get_all_timestamped_files_sorted(
@@ -266,10 +283,10 @@ class CameraMonitor(object):
             if now - t > self.log_lifespan:
                 f.unlink()
                 n_blobs_deleted += 1
-        self.log(f"Deleted {n_blobs_deleted} old blobs files")
+        logger.log(logging.INFO, f"Deleted {n_blobs_deleted} old blobs files")
 
         # Remove any remaining empty directories
         for path, subdirs, files in self.output_dir.walk(top_down=False):
             if not files and not subdirs and path != self.output_dir:
                 path.rmdir()
-        self.log("Cleanup complete.")
+        logger.log(logging.INFO, "Cleanup complete.")

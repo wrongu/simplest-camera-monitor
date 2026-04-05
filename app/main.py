@@ -16,16 +16,18 @@ from camera_monitor import (
 )
 from cameras import ONVIFCameraWrapper
 from typing import Callable, Optional
+from utils import LogHandler
 
 ONE_DAY_SECONDS = 24 * 60 * 60
 
-CONFIG_PATH = Path("/config/config.yaml")
+CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "/config/config.yaml"))
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("camera_monitor")
+logger.addHandler(LogHandler(batch_every=30 * 60))
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +220,9 @@ def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonit
                 output_dir=media_dir,
                 log_lifespan=cam_config.get("log_lifespan", ONE_DAY_SECONDS / 2),
                 log=log,
-                on_state_transition=make_handle_state_transition(client, trigger_classes),
+                on_state_transition=make_handle_state_transition(
+                    client, trigger_classes
+                ),
                 on_detection=make_handle_detections(
                     client, trigger_classes, make_log(f"camera_monitor.{cam_name}")
                 ),
