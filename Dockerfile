@@ -19,4 +19,5 @@ RUN apk add g++ cmake
 RUN pip install --no-cache-dir -r requirements.txt
 RUN apk del g++ cmake
 
+ENTRYPOINT ["/command/with-contenv"]
 CMD ["python", "main.py"]

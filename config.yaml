@@ -1,6 +1,6 @@
 name: "Camera Monitor"
 description: "ONVIF camera motion detection and object classification"
-version: "1.0.1"
+version: "1.0.3"
 slug: "camera_monitor"
 init: false
 homeassistant_api: true
@@ -11,3 +11,6 @@ arch:
 map:
   - addon_config:ro # read /config/config.yaml (mapped from /addon_configs/local_camera_monitor/config.yaml)
   - media:rw # camera image logs (output_dir)
+privileged:
+  - SYS_TIME # for accurate timestamping of camera images
+stage: experimental
