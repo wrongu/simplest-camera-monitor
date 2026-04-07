@@ -1,0 +1,12 @@
+*.pyc
+.devcontainer
+.env
+.git*
+.idea
+.venv
+.vscode
+CLAUDE.md
+TODO.md
+__pycache__
+data
+local/

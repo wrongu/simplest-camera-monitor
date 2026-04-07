@@ -2,3 +2,4 @@ numpy
 onvif_zeep
 pyyaml
 requests
+scikit-learn
