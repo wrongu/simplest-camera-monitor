@@ -95,7 +95,7 @@ class HomeAssistantClient:
             return
         try:
             resp = requests.post(
-                f"{self.api_url}/states/{entity_id}",
+                f"{self.api_url}/states/binary_sensor.{entity_id}",
                 headers={"Authorization": f"Bearer {self.token}"},
                 json={"state": state},
                 timeout=5,
