@@ -2,7 +2,5 @@
 appdaemon
 black
 matplotlib
-opencv-python
-scikit-learn
 pandas
 tqdm

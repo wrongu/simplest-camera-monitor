@@ -8,6 +8,7 @@ host_network: true
 arch:
   - aarch64
   - amd64
+  - arm64
 map:
   - addon_config:ro # read /config/config.yaml (mapped from /addon_configs/local_camera_monitor/config.yaml)
   - media:rw # camera image logs (output_dir)

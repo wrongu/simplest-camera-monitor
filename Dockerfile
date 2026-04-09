@@ -1,9 +1,11 @@
-FROM hdgigante/python-opencv:4.13.0-alpine
+FROM python:3.12-slim
 
 COPY requirements.txt .
-RUN apk add g++ cmake
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.txt
-RUN apk del g++ cmake
+RUN apt-get remove libglib2.0-0
 
 COPY app /app
 WORKDIR /app
