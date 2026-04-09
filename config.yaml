@@ -5,10 +5,11 @@ slug: "camera_monitor"
 init: false
 homeassistant_api: true
 host_network: true
+# arch options are ['aarch64', 'amd64', 'armhf', 'armv7', 'i386']
+# ...but ['armhf', 'armv7', 'i386'] are all deprecated
 arch:
   - aarch64
   - amd64
-  - arm64
 map:
   - addon_config:ro # read /config/config.yaml (mapped from /addon_configs/local_camera_monitor/config.yaml)
   - media:rw # camera image logs (output_dir)
