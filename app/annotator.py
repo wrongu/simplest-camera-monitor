@@ -153,7 +153,7 @@ class Interface(object):
                     self._active_bbox.class_id = chr(self.last_keypress)
                     if self._active_bbox not in self.annotations:
                         self.annotations.append(self._active_bbox)
-            elif self.last_keypress in [40, 127]:
+            elif self.last_keypress in [0, 8, 40, 127]:
                 # Delete or backspace
                 if self._active_bbox is not None:
                     if self._active_bbox in self.annotations:
@@ -175,7 +175,7 @@ def iter_files_with_flags(annotations, image_dir):
     for time_and_file in get_all_timestamped_files_sorted(image_dir):
         timestamp, filename = time_and_file
         key = str(filename.relative_to(image_dir))
-        if key >= up_through:
+        if up_through is None or key >= up_through:
             skipping = False
 
         needs_annotation = key not in annotations or not isinstance(
@@ -268,13 +268,13 @@ def main(
             interface = Interface(img, init_bboxes, labels)
             if key in prior_annotations and key not in annotations:
                 interface.init_with_prior_annotations(prior_annotations[key])
-            result: list[BoundingBox] = interface.run_interactive(
+            result = interface.run_interactive(
                 extra_quit_keys=[ord(","), ord("."), ord(" ")]
             )
             if interface.last_keypress == 27:
                 quit_requested = True
                 break
-            elif len(result) > 0:
+            elif result is not None and len(result) > 0:
                 annotations[key] = [b.to_dict() for b in result]
             elif len(result) == 0 and key in annotations:
                 del annotations[key]
