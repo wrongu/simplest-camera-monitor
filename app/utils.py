@@ -21,7 +21,7 @@ class LogHandler(logging.Handler):
             count = self.message_count[key]
             if count > 1:
                 record.msg = f"{record.msg} (repeated {count} times)"
-            print(record)
+            print(record.getMessage())
             self.last_emit_time[key] = now
             self.message_count[key] = 0
 
