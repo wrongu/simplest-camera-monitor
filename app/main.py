@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 from pathlib import Path
 
 import cv2 as cv
@@ -107,30 +108,6 @@ class HomeAssistantClient:
 
 
 # ---------------------------------------------------------------------------
-# AppDaemon self.log replacement
-# ---------------------------------------------------------------------------
-
-
-def make_log(name: str):
-    """Return a log callable with the same signature as AppDaemon's self.log."""
-    # TODO - just change the CameraMonitor log signature to match logging.Logger and skip this adapter step
-    log = logging.getLogger(name)
-    level_map = {
-        "DEBUG": logging.DEBUG,
-        "INFO": logging.INFO,
-        "WARNING": logging.WARNING,
-        "WARN": logging.WARNING,
-        "ERROR": logging.ERROR,
-        "CRITICAL": logging.CRITICAL,
-    }
-
-    def _log(msg: str, level: str = "INFO"):
-        log.log(level_map.get(level.upper(), logging.INFO), msg)
-
-    return _log
-
-
-# ---------------------------------------------------------------------------
 # Callbacks (mirrors app.py handle_state_transition / handle_detections)
 # ---------------------------------------------------------------------------
 
@@ -175,15 +152,15 @@ def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonit
     trigger_classes = config.get("watch_for_class", [])
     poll_frequency = config["poll_frequency"]
     monitor_slots: list[CameraMonitor | None] = [None] * len(config["cameras"])
+    media_root = Path(config.get("media_root", "/media"))
 
     def init_camera(i, cam_config):
         cam_name = cam_config.get("name", str(i))
-        media_dir = Path("/media") / cam_name.lower().replace(" ", "_")
+        media_dir = media_root / cam_name.lower().replace(" ", "_")
         roi_path = media_dir / "roi.png"
         roi = (
             cv.imread(str(roi_path), cv.IMREAD_GRAYSCALE) if roi_path.exists() else None
         )
-        log = make_log(f"camera_monitor.{cam_name}")
         try:
             mon = CameraMonitor(
                 camera=ONVIFCameraWrapper(
@@ -248,10 +225,22 @@ def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonit
 
 
 def poll_loop(monitors: list[CameraMonitor], interval: float) -> None:
-    while True:
-        for monitor in monitors:
-            monitor.poll()
-        time.sleep(interval)
+    with ThreadPoolExecutor(max_workers=len(monitors), thread_name_prefix="poll") as executor:
+        next_poll = time.monotonic() + interval
+        while True:
+            futures = [executor.submit(m.poll) for m in monitors]
+            futures_wait(futures, timeout=interval)
+            for f in futures:
+                if f.done() and not f.cancelled():
+                    exc = f.exception()
+                    if exc is not None:
+                        logger.error(f"Unexpected error in poll: {exc}")
+            sleep_time = next_poll - time.monotonic()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            else:
+                logger.warning(f"Poll cycle overran by {-sleep_time:.2f}s")
+            next_poll += interval
 
 
 def cleanup_loop(monitors: list[CameraMonitor]) -> None:
