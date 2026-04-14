@@ -21,6 +21,9 @@ from image_loader import get_all_timestamped_files_sorted
 
 ANNOTATION_FILE = "annotations.json"
 
+# Sentinel used to mark a prefetch slot that has a thread running but hasn't finished yet.
+_PREFETCH_PENDING = object()
+
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -96,7 +99,7 @@ class FrameState:
     labels: dict
     loading: bool
     skipping: bool
-    needs_pause: bool     # False → frontend should auto-advance after a short delay
+    needs_pause: bool     # False → frontend should auto-advance after its configured delay
     done: bool
 
     def to_dict(self) -> dict:
@@ -159,12 +162,11 @@ def _apply_prior_annotations(
 # ─── Annotator state ──────────────────────────────────────────────────────────
 
 
-# History entries are (key: str, img_bytes: bytes, bboxes: list[LabeledBox])
-_HistoryEntry = tuple
-
-
 class AnnotatorState:
     """All mutable state for the annotation session, protected by a lock."""
+
+    # How many unannotated files ahead to prefetch from disk.
+    PREFETCH_AHEAD = 3
 
     def __init__(
         self,
@@ -183,10 +185,23 @@ class AnnotatorState:
 
         self.annot = AnnotationFile.load(self.annot_file)
 
-        all_files = list(get_all_timestamped_files_sorted(image_dir))
-        self._total_files = len(all_files)
-        self._file_iter = self._iter_files()
+        # Full sorted file list. Stored so we can index into it for prefetching.
+        self._all_files: list = list(get_all_timestamped_files_sorted(image_dir))
+        self._total_files: int = len(self._all_files)
+
+        # Index into _all_files; the next file to process.
+        self._iter_idx: int = self._find_resume_idx()
+
+        # file_index counts how many files from _all_files have been visited.
+        # Initialised to the resume offset so progress is correct on resume.
+        self._file_index: int = self._iter_idx
+
+        # Files just before the resume point that may be needed for bg model warm-up.
         self._recent_skipped: deque = deque()
+        self._populate_recent_skipped_for_warmup()
+
+        # Prefetch cache: str(filename) → bytes (raw JPEG) or _PREFETCH_PENDING.
+        self._prefetch_cache: dict = {}
 
         self.history_left: deque = deque(maxlen=200)
         self.history_right: deque = deque(maxlen=200)
@@ -198,45 +213,114 @@ class AnnotatorState:
 
         self._loading: bool = False
         self._done: bool = False
-        # If --paused is set, start with skipping off even when --skip-no-motion was passed.
+        # --paused overrides --skip-no-motion: start with skipping off so every frame pauses.
         self._skipping: bool = skip_no_motion and not paused
-        # Counts files from the iterator (including fast-forwarded ones) for progress display.
-        self._file_index: int = 0
-        # Counts only annotatable frames processed; used for periodic save checkpoints.
         self._images_processed: int = 0
 
-    # ── Iterator ──────────────────────────────────────────────────────────────
+    # ── Resume helpers ────────────────────────────────────────────────────────
 
-    def _iter_files(self):
-        """Yield (timestamp, filename, needs_annotation) for every file."""
-        up_through = self.annot.through
-        skipping_resume = up_through is not None
-        for timestamp, filename in get_all_timestamped_files_sorted(self.image_dir):
-            key = str(filename.relative_to(self.image_dir))
-            if up_through is None or key >= up_through:
-                skipping_resume = False
-            needs_annotation = key not in self.annot.images
-            yield timestamp, filename, needs_annotation and not skipping_resume
+    def _find_resume_idx(self) -> int:
+        """Return the index of the first file at or after the `through` key."""
+        through = self.annot.through
+        if through is None:
+            return 0
+        for i, (ts, fn) in enumerate(self._all_files):
+            if str(fn.relative_to(self.image_dir)) >= through:
+                return i
+        return len(self._all_files)  # through is past all files
+
+    def _populate_recent_skipped_for_warmup(self):
+        """
+        Pre-populate _recent_skipped with files just before the resume point so
+        the background model can be warmed up when processing the first new frame.
+        """
+        if self._iter_idx == 0 or self.annot.through is None:
+            return
+        if self._iter_idx >= len(self._all_files):
+            resume_ts = self._all_files[-1][0]
+        else:
+            resume_ts = self._all_files[self._iter_idx][0]
+        lookback_ts = resume_ts - 2 * self.bg_model.history_seconds
+        # Scan backwards to find how far to look, then append in forward (chronological) order.
+        start_i = 0
+        for i in range(self._iter_idx - 1, -1, -1):
+            if self._all_files[i][0] < lookback_ts:
+                start_i = i + 1
+                break
+        for i in range(start_i, self._iter_idx):
+            self._recent_skipped.append(self._all_files[i])
+
+    # ── Prefetching ───────────────────────────────────────────────────────────
+
+    def _do_prefetch(self, fn: Path):
+        """Background thread: read a file from disk into the prefetch cache."""
+        try:
+            self._prefetch_cache[str(fn)] = fn.read_bytes()
+        except Exception:
+            self._prefetch_cache.pop(str(fn), None)
+
+    def _kickoff_prefetch(self):
+        """
+        Launch background disk reads for the next PREFETCH_AHEAD unannotated files.
+        Also evicts cache entries that are no longer needed (already processed).
+        """
+        # Evict stale entries: keep only files from the current iterator position forward.
+        upcoming = {
+            str(fn)
+            for _, fn in self._all_files[self._iter_idx: self._iter_idx + self.PREFETCH_AHEAD * 2]
+        }
+        stale = [k for k in self._prefetch_cache if k not in upcoming]
+        for k in stale:
+            del self._prefetch_cache[k]
+
+        # Launch prefetch threads for the next few unannotated files.
+        idx = self._iter_idx
+        launched = 0
+        while idx < len(self._all_files) and launched < self.PREFETCH_AHEAD:
+            ts, fn = self._all_files[idx]
+            idx += 1
+            key = str(fn.relative_to(self.image_dir))
+            if key in self.annot.images:
+                continue  # skip already-annotated files
+            fn_str = str(fn)
+            if fn_str not in self._prefetch_cache:
+                self._prefetch_cache[fn_str] = _PREFETCH_PENDING
+                threading.Thread(
+                    target=self._do_prefetch, args=(fn,), daemon=True
+                ).start()
+            launched += 1
 
     # ── Image processing ──────────────────────────────────────────────────────
 
-    def _encode_image(self, img) -> bytes:
-        ok, buf = cv.imencode(".jpg", img)
-        if not ok:
-            raise RuntimeError("Failed to encode image as JPEG")
-        return buf.tobytes()
+    def _process_image(self, timestamp, filename: Path) -> tuple:
+        """
+        Run the background model on one image.
 
-    def _process_image(self, timestamp, filename) -> tuple:
-        """Run the background model on one image; return (jpeg_bytes, list[LabeledBox])."""
-        img = cv.imread(str(filename))
+        Returns (raw_jpeg_bytes, list[LabeledBox]).
+
+        The raw JPEG bytes come directly from disk (no re-encoding), which avoids
+        a costly cv.imencode call and serves the browser the original image quality.
+        A prefetch cache is checked first so disk I/O overlaps with display time.
+        """
+        fn_str = str(filename)
+        cached = self._prefetch_cache.pop(fn_str, None)
+        if isinstance(cached, bytes):
+            raw_bytes = cached
+        else:
+            # Either not prefetched yet, or prefetch thread still running — read directly.
+            raw_bytes = filename.read_bytes()
+
+        # Decode to BGR array for the background model.
+        buf = np.frombuffer(raw_bytes, dtype=np.uint8)
+        img = cv.imdecode(buf, cv.IMREAD_COLOR)
+
         _, blobs = self.bg_model.applyWithStats(img, timestamp)
         blobs = [
             b for b in blobs
             if np.mean(b.shadow_correlation()) < self.bg_model.shadow_correlation_threshold
         ]
         bboxes = [LabeledBox.from_bbox(b.bbox) for b in blobs]
-        img_bytes = self._encode_image(img)
-        return img_bytes, bboxes
+        return raw_bytes, bboxes
 
     def _load_frame(self, key: str, img_bytes: bytes, bboxes: list, needs_pause: bool):
         """Set the current frame. Must be called under self.lock."""
@@ -250,69 +334,72 @@ class AnnotatorState:
 
     def _do_load_next_from_iterator(self):
         """
-        Advance through the file iterator to the next frame to display.
+        Advance through the file list to the next frame to display.
 
-        Designed to be called on a background thread (or synchronously on first load).
-        All frames with needs_annotation=True are loaded and returned — no-motion frames
-        when skipping is on are marked needs_pause=False so the frontend auto-advances them,
-        but they are still visible to the user.
+        May be called on a background thread (for subsequent frames) or the main
+        thread (for the initial frame). All new (unannotated) frames are returned —
+        no-motion frames in skip mode are marked needs_pause=False so the browser
+        auto-advances them, but they are still visible so the user can spot false
+        negatives from the background model.
         """
-        # Push the current frame to history BEFORE iterating so that `,` navigation
-        # returns frames in strict chronological order (oldest → newest).
+        # Push the current frame to history BEFORE iterating so that `,` returns
+        # frames in strict chronological order.
         with self.lock:
             if self.current_key is not None:
                 self.history_left.append(
                     (self.current_key, self.current_img_bytes, self.current_bboxes)
                 )
 
-        try:
-            while True:
-                timestamp, filename, needs_annotation = next(self._file_iter)
-                key = str(filename.relative_to(self.image_dir))
+        while self._iter_idx < len(self._all_files):
+            timestamp, filename = self._all_files[self._iter_idx]
+            self._iter_idx += 1
+            self._file_index = self._iter_idx  # progress tracks all files visited
 
-                # Count every file for progress tracking, including resume fast-forward.
-                self._file_index += 1
+            key = str(filename.relative_to(self.image_dir))
 
-                if not needs_annotation:
-                    # Fast-forward: file was already processed before the resume point.
-                    # Update the bg model lazily (burn-through on next annotatable frame).
-                    self._recent_skipped.append((timestamp, filename))
-                    continue
+            if key in self.annot.images:
+                # Already annotated: add to burn-through queue and move on.
+                self._recent_skipped.append((timestamp, filename))
+                continue
 
-                # Burn through recently-skipped files to keep the bg model current.
-                while self._recent_skipped:
-                    ts, fn = self._recent_skipped.popleft()
-                    if ts >= timestamp - 2 * self.bg_model.history_seconds:
+            # Burn through recently-skipped files to keep the bg model current.
+            while self._recent_skipped:
+                ts, fn = self._recent_skipped.popleft()
+                if ts >= timestamp - 2 * self.bg_model.history_seconds:
+                    # Try cache first to avoid a redundant disk read.
+                    cached = self._prefetch_cache.pop(str(fn), None)
+                    if isinstance(cached, bytes):
+                        buf = np.frombuffer(cached, dtype=np.uint8)
+                        img = cv.imdecode(buf, cv.IMREAD_COLOR)
+                    else:
                         img = cv.imread(str(fn))
-                        self.bg_model.applyWithStats(img, ts)
+                    self.bg_model.applyWithStats(img, ts)
 
-                self._images_processed += 1
-                if self._images_processed % 100 == 0:
-                    with self.lock:
-                        self.annot.save(self.annot_file, through_key=key)
-
-                img_bytes, bboxes = self._process_image(timestamp, filename)
-
-                # Pre-populate labels from prior annotations via IoU matching.
-                prior = self.prior_annotations.get(key, [])
-                if prior and key not in self.annot.images:
-                    _apply_prior_annotations(bboxes, prior)
-
-                # A frame needs the user to pause and annotate if it has detected blobs,
-                # or if skip mode is off (every frame is shown for potential annotation).
-                # No-motion frames in skip mode get needs_pause=False: the frontend
-                # displays them briefly and auto-advances, allowing the user to spot false
-                # negatives from the background model and interrupt if needed.
-                needs_pause = bool(bboxes) or not self._skipping
-
+            self._images_processed += 1
+            if self._images_processed % 100 == 0:
                 with self.lock:
-                    self._load_frame(key, img_bytes, bboxes, needs_pause=needs_pause)
-                return
+                    self.annot.save(self.annot_file, through_key=key)
 
-        except StopIteration:
+            img_bytes, bboxes = self._process_image(timestamp, filename)
+
+            # Pre-populate labels from prior annotations via IoU matching.
+            prior = self.prior_annotations.get(key, [])
+            if prior and key not in self.annot.images:
+                _apply_prior_annotations(bboxes, prior)
+
+            needs_pause = bool(bboxes) or not self._skipping
+
+            # Kick off prefetch for upcoming files while the bg thread is still running.
+            self._kickoff_prefetch()
+
             with self.lock:
-                self._done = True
-                self._loading = False
+                self._load_frame(key, img_bytes, bboxes, needs_pause=needs_pause)
+            return
+
+        # Exhausted all files.
+        with self.lock:
+            self._done = True
+            self._loading = False
 
     def _start_load_next(self):
         """Set loading=True and spawn a background thread to load the next frame."""
@@ -327,8 +414,8 @@ class AnnotatorState:
         """
         Mutate navigation state. Must be called under self.lock.
 
-        History navigation (prev/next from history) always pauses for user input.
-        Forward iteration (next from iterator / resume) uses needs_pause from the frame.
+        History navigation always sets needs_pause=True — the user is explicitly
+        reviewing those frames. Forward iteration uses the frame's computed needs_pause.
         """
         if action == "prev":
             if self.history_left:
@@ -349,20 +436,19 @@ class AnnotatorState:
                 self._start_load_next()
 
         elif action == "resume":
-            # Drain history_right to reach the newest previously-seen frame.
+            # Drain history_right to reach the most recently-seen frame, then advance.
             while self.history_right:
                 self.history_left.append(
                     (self.current_key, self.current_img_bytes, self.current_bboxes)
                 )
                 key, img_bytes, bboxes = self.history_right.pop()
                 self._load_frame(key, img_bytes, bboxes, needs_pause=True)
-            # Then advance to the next unseen frame.
             self._start_load_next()
 
         elif action == "toggle_skip":
             self._skipping = not self._skipping
-            # Recompute needs_pause for the currently-displayed frame so the frontend
-            # responds immediately without waiting for the next navigation action.
+            # Recompute needs_pause for the current frame immediately so the frontend
+            # responds without waiting for the next navigation action.
             self.current_needs_pause = bool(self.current_bboxes) or not self._skipping
 
         elif action == "quit":
@@ -467,7 +553,7 @@ def main(
     )
     pprint(state.annot.labels)
 
-    # Load the first frame synchronously before the server starts.
+    # Load the first frame synchronously before starting the server.
     state._do_load_next_from_iterator()
 
     if state._done:
@@ -553,7 +639,6 @@ if __name__ == "__main__":
             sys.exit(1)
         with open(args.prior_annotations, "r") as f:
             raw = json.load(f)
-        # Convert prior annotation dicts to typed LabeledBox objects.
         prior_annotations = {
             k: [LabeledBox.from_dict(b) for b in v]
             for k, v in raw.items()
