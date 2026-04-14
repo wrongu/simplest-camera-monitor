@@ -16,7 +16,7 @@
     gap: 16px;
     flex-shrink: 0;
   }
-  #toolbar .progress { color: #aaa; }
+  #toolbar .progress { color: #aaa; white-space: nowrap; }
   #toolbar .key { color: #7cf; font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 
   #main {
@@ -54,6 +54,17 @@
     color: #fff;
   }
   #loading-overlay.visible { display: flex; }
+
+  /* Thin animated bar shown while auto-advancing through no-motion frames */
+  #autoadvance-bar {
+    display: none;
+    position: absolute;
+    bottom: 0; left: 0;
+    height: 3px;
+    background: #4af;
+    transition: width linear;
+  }
+  #autoadvance-bar.visible { display: block; }
 
   #done-overlay {
     display: none;
@@ -140,7 +151,7 @@
   button:active { background: #555; }
   button.primary { background: #1a5a1a; border-color: #2a7a2a; }
   button.primary:hover { background: #256a25; }
-  button.skip.on { background: #aaaaaa; border-color: #222222; }
+  button.skip.on { background: #aaaaaa; border-color: #222222; color: #222; }
   button.skip.off { background: #222222; border-color: #aaaaaa; }
   button.danger { background: #5a1a1a; border-color: #7a2a2a; }
   button.danger:hover { background: #6a2525; }
@@ -191,6 +202,7 @@
   <div id="canvas-wrap">
     <canvas id="canvas"></canvas>
     <div id="loading-overlay">Processing frames…</div>
+    <div id="autoadvance-bar"></div>
     <div id="done-overlay">
       <div>All done!</div>
       <div style="font-size:13px;color:#aaa">Annotations saved. You may close this tab.</div>
@@ -209,23 +221,23 @@
       <span>Space</span> resume<br>
       <span>Enter</span> next image<br>
       <span>Esc</span> quit<br>
+      <span>S</span> toggle skip mode<br>
       <span>RClick drag</span> draw box<br>
-      <span>LClick</span> select box<br>
-      <span>S</span> toggle skip mode
+      <span>LClick</span> select box
     </div>
   </div>
 </div>
 
 <div id="controls">
-  <button onclick="navigate('prev')">&larr; Prev (,)</button>
-  <button onclick="navigate('resume')">Resume (Space)</button>
-  <button class="primary" onclick="navigate('next')">Next (.) &rarr;</button>
-  <button class="skip on" onclick="navigate('toggle_skip')" id="toggle-skip">Turn On Skipping (S)</button>
+  <button onclick="userNavigate('prev')">&larr; Prev (,)</button>
+  <button onclick="userNavigate('resume')">Resume (Space)</button>
+  <button class="primary" onclick="userNavigate('next')">Next (.) &rarr;</button>
+  <button class="skip on" onclick="userNavigate('toggle_skip')" id="toggle-skip">Skipping: On (S)</button>
   <button class="danger" onclick="confirmQuit()">Quit (Esc)</button>
   <span id="box-count"></span>
 </div>
 
-<div id="modal-overlay" id="modal-overlay">
+<div id="modal-overlay">
   <div id="modal">
     <h3 id="modal-title">Enter name for label</h3>
     <input id="modal-input" type="text" placeholder="label name…" />
@@ -242,16 +254,46 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const img = new Image();
 
-let serverState = null;   // last state received from /api/state
-let localBoxes = [];      // [{x, y, w, h, label: str|null}]
+let serverState = null;   // last FrameState received from the server
+let localBoxes = [];      // [{x, y, w, h, label: str|null}] — working set for current frame
 let activeIdx = -1;       // index into localBoxes, or -1
-let dragStart = null;     // {x, y} in image coords, or null
+let dragStart = null;     // {x, y} in image-pixel coords, or null (right-click drag)
 let scaleX = 1, scaleY = 1;
-let pollTimer = null;
+
+let pollTimer = null;       // timeout id for loading-state polling
+let autoAdvTimer = null;    // timeout id for auto-advance (needs_pause=false frames)
+
+const AUTO_ADVANCE_MS = 200;  // how long to display a no-motion frame before advancing
 
 const COLOR_UNLABELED = '#f55';
 const COLOR_LABELED   = '#4d4';
 const COLOR_ACTIVE    = '#ff0';
+
+// ─── Auto-advance ─────────────────────────────────────────────────────────────
+function cancelAutoAdvance() {
+  if (autoAdvTimer !== null) {
+    clearTimeout(autoAdvTimer);
+    autoAdvTimer = null;
+  }
+  document.getElementById('autoadvance-bar').classList.remove('visible');
+}
+
+function scheduleAutoAdvance() {
+  cancelAutoAdvance();
+  const bar = document.getElementById('autoadvance-bar');
+  bar.classList.add('visible');
+  bar.style.transition = 'none';
+  bar.style.width = '0%';
+  // Force reflow so transition fires
+  void bar.offsetWidth;
+  bar.style.transition = `width ${AUTO_ADVANCE_MS}ms linear`;
+  bar.style.width = '100%';
+  autoAdvTimer = setTimeout(() => {
+    autoAdvTimer = null;
+    bar.classList.remove('visible');
+    navigate('next');
+  }, AUTO_ADVANCE_MS);
+}
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
 function redraw() {
@@ -277,12 +319,13 @@ function redraw() {
 }
 
 // ─── Image loading ────────────────────────────────────────────────────────────
-function loadImage() {
+function loadImage(onLoaded) {
   img.onload = () => {
     canvas.width = img.naturalWidth;
     canvas.height = img.naturalHeight;
     updateScale();
     redraw();
+    if (onLoaded) onLoaded();
   };
   img.src = '/api/image?' + Date.now(); // cache-bust
 }
@@ -297,45 +340,51 @@ window.addEventListener('resize', () => { updateScale(); redraw(); });
 
 // ─── State sync ───────────────────────────────────────────────────────────────
 function applyState(state) {
+  const prevKey = serverState?.key;
   serverState = state;
 
-  document.getElementById('progress').textContent = `${state.processed} / ${state.total}`;
+  document.getElementById('progress').textContent = `${state.file_index} / ${state.total}`;
   document.getElementById('current-key').textContent = state.key ?? '—';
-
   renderLabels(state.labels);
+
+  // Update skip button
+  const skipBtn = document.getElementById('toggle-skip');
+  if (state.skipping) {
+    skipBtn.textContent = 'Skipping: On (S)';
+    skipBtn.classList.remove('off'); skipBtn.classList.add('on');
+  } else {
+    skipBtn.textContent = 'Skipping: Off (S)';
+    skipBtn.classList.remove('on'); skipBtn.classList.add('off');
+  }
 
   document.getElementById('loading-overlay').classList.toggle('visible', state.loading);
   document.getElementById('done-overlay').classList.toggle('visible', state.done && !state.loading);
-  skipButton = document.getElementById('toggle-skip');
-  if (state.skipping) {
-    skipButton.textContent = 'Turn Off Skipping';
-    skipButton.classList.remove('off');
-    skipButton.classList.add('on');
-  } else {
-    skipButton.textContent = 'Turn On Skipping';
-    skipButton.classList.remove('on');
-    skipButton.classList.add('off');
-  }
 
   if (state.loading) {
+    cancelAutoAdvance();
     schedulePoll();
     return;
   }
-
   clearPoll();
 
-  // Initialise localBoxes from existing annotations, else from auto-detected blobs
-  const source = state.existing_annotations?.length > 0
-    ? state.existing_annotations
-    : state.blobs;
+  // Only reinitialise localBoxes when the displayed frame changes.
+  if (state.key !== prevKey) {
+    const source = state.existing_annotations?.length > 0
+      ? state.existing_annotations
+      : state.blobs;
+    localBoxes = (source ?? []).map(b => ({
+      x: b.bbox[0], y: b.bbox[1], w: b.bbox[2], h: b.bbox[3],
+      label: b.label ?? null
+    }));
+    activeIdx = localBoxes.length > 0 ? 0 : -1;
+  }
 
-  localBoxes = (source ?? []).map(b => ({
-    x: b.bbox[0], y: b.bbox[1], w: b.bbox[2], h: b.bbox[3],
-    label: b.label ?? null
-  }));
-
-  activeIdx = localBoxes.length > 0 ? 0 : -1;
-  loadImage();
+  // Load the image; once loaded decide whether to auto-advance or wait.
+  loadImage(() => {
+    if (!state.done && !state.needs_pause) {
+      scheduleAutoAdvance();
+    }
+  });
 }
 
 function renderLabels(labels) {
@@ -351,7 +400,7 @@ function renderLabels(labels) {
   }
 }
 
-// ─── Polling (while loading) ──────────────────────────────────────────────────
+// ─── Polling (while server is processing frames) ──────────────────────────────
 function schedulePoll() {
   clearPoll();
   pollTimer = setTimeout(fetchState, 500);
@@ -364,10 +413,9 @@ function clearPoll() {
 async function fetchState() {
   try {
     const res = await fetch('/api/state');
-    const state = await res.json();
-    applyState(state);
+    applyState(await res.json());
   } catch (e) {
-    schedulePoll(); // retry on error
+    schedulePoll(); // retry on transient error
   }
 }
 
@@ -380,14 +428,20 @@ async function navigate(action) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ bboxes, action })
     });
-    const state = await res.json();
-    applyState(state);
+    applyState(await res.json());
   } catch (e) {
     console.error('navigate failed', e);
   }
 }
 
+// User-initiated navigation cancels any pending auto-advance first.
+function userNavigate(action) {
+  cancelAutoAdvance();
+  navigate(action);
+}
+
 function confirmQuit() {
+  cancelAutoAdvance();
   if (window.confirm('Save and quit?')) navigate('quit');
 }
 
@@ -420,13 +474,13 @@ function setBoundsFromDrag(box, x0, y0, x1, y1) {
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 canvas.addEventListener('mousedown', e => {
+  cancelAutoAdvance();
   if (e.button !== 2) return;
   e.preventDefault();
   const { x, y } = clientToImage(e.clientX, e.clientY);
   dragStart = { x, y };
 
   if (activeIdx >= 0) {
-    // Reuse active box
     setBoundsFromDrag(localBoxes[activeIdx], x, y, x, y);
   } else {
     localBoxes.push({ x, y, w: 0, h: 0, label: null });
@@ -467,9 +521,11 @@ canvas.addEventListener('mouseup', e => {
 
 // ─── Keyboard shortcuts ───────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
-  // Don't intercept keys when modal or text input is focused
   if (document.getElementById('modal-overlay').classList.contains('visible')) return;
   if (e.target.tagName === 'INPUT') return;
+
+  // Any keypress cancels auto-advance so the user can interact with the frame.
+  cancelAutoAdvance();
 
   const key = e.key;
 
@@ -481,7 +537,6 @@ document.addEventListener('keydown', e => {
       localBoxes[activeIdx].label = labelId;
       redraw();
     } else {
-      // Need to define this label first
       openModal(labelId, () => {
         localBoxes[activeIdx].label = labelId;
         redraw();
@@ -506,7 +561,7 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     navigate('prev');
 
-  } else if (key === '.') {
+  } else if (key === '.' || key === 'Enter') {
     e.preventDefault();
     navigate('next');
 
@@ -514,14 +569,11 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     navigate('resume');
 
-  } else if (key === 'Enter') {
-    e.preventDefault();
-    navigate('next');
-
   } else if (key === 'Escape') {
     e.preventDefault();
     confirmQuit();
-  } else if (key === 'S' || key === 's') {
+
+  } else if (key === 's' || key === 'S') {
     e.preventDefault();
     navigate('toggle_skip');
   }
@@ -550,13 +602,11 @@ async function confirmModal() {
   const name = document.getElementById('modal-input').value.trim();
   if (!name) return;
   document.getElementById('modal-overlay').classList.remove('visible');
-  // Save label name to server
   await fetch('/api/labels', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: _modalLabelId, name })
   });
-  // Update local serverState so renderLabels is correct immediately
   if (serverState) serverState.labels[_modalLabelId] = name;
   renderLabels(serverState?.labels ?? {});
   if (_modalCallback) _modalCallback();
