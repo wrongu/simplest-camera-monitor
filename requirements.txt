@@ -4,3 +4,4 @@ pyyaml
 requests
 scikit-learn
 opencv-contrib-python-headless
+flask

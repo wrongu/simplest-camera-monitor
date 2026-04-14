@@ -3,4 +3,3 @@ black
 matplotlib
 pandas
 tqdm
-opencv-contrib-python

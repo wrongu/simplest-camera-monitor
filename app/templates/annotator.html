@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Annotator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #1a1a1a; color: #eee; font-family: monospace; font-size: 13px; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  #toolbar {
+    background: #2a2a2a;
+    border-bottom: 1px solid #444;
+    padding: 6px 12px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  #toolbar .progress { color: #aaa; }
+  #toolbar .key { color: #7cf; font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
+  #main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  #canvas-wrap {
+    flex: 1;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: #111;
+  }
+
+  #canvas {
+    display: block;
+    cursor: crosshair;
+    max-width: 100%;
+    max-height: 100%;
+    image-rendering: pixelated;
+  }
+
+  #loading-overlay {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.65);
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    color: #fff;
+  }
+  #loading-overlay.visible { display: flex; }
+
+  #done-overlay {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.8);
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    color: #7f7;
+    flex-direction: column;
+    gap: 12px;
+  }
+  #done-overlay.visible { display: flex; }
+
+  #sidebar {
+    width: 200px;
+    background: #222;
+    border-left: 1px solid #444;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+  #sidebar h3 {
+    padding: 8px 10px;
+    background: #2a2a2a;
+    border-bottom: 1px solid #444;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #aaa;
+  }
+  #labels-list { padding: 8px; flex: 1; }
+  .label-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 4px;
+    border-radius: 3px;
+    margin-bottom: 2px;
+  }
+  .label-key {
+    background: #444;
+    color: #ddd;
+    border-radius: 2px;
+    padding: 1px 5px;
+    font-size: 11px;
+    min-width: 18px;
+    text-align: center;
+  }
+  .label-name { color: #ccc; }
+  .label-item.undefined .label-name { color: #666; font-style: italic; }
+
+  #shortcuts {
+    padding: 8px 10px;
+    border-top: 1px solid #444;
+    font-size: 11px;
+    color: #666;
+    line-height: 1.8;
+  }
+  #shortcuts span { color: #888; }
+
+  #controls {
+    background: #2a2a2a;
+    border-top: 1px solid #444;
+    padding: 8px 12px;
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+    align-items: center;
+  }
+  button {
+    background: #3a3a3a;
+    border: 1px solid #555;
+    color: #ddd;
+    padding: 5px 14px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: monospace;
+    font-size: 12px;
+  }
+  button:hover { background: #4a4a4a; }
+  button:active { background: #555; }
+  button.primary { background: #1a5a1a; border-color: #2a7a2a; }
+  button.primary:hover { background: #256a25; }
+  button.skip.on { background: #aaaaaa; border-color: #222222; }
+  button.skip.off { background: #222222; border-color: #aaaaaa; }
+  button.danger { background: #5a1a1a; border-color: #7a2a2a; }
+  button.danger:hover { background: #6a2525; }
+  #box-count { color: #888; margin-left: auto; }
+
+  /* Label name modal */
+  #modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  #modal-overlay.visible { display: flex; }
+  #modal {
+    background: #2a2a2a;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 20px 24px;
+    width: 320px;
+  }
+  #modal h3 { margin-bottom: 12px; font-size: 14px; color: #ddd; }
+  #modal input {
+    width: 100%;
+    background: #1a1a1a;
+    border: 1px solid #555;
+    color: #eee;
+    padding: 6px 10px;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  #modal input:focus { outline: none; border-color: #7cf; }
+  #modal .modal-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <span class="progress" id="progress">0 / 0</span>
+  <span class="key" id="current-key">—</span>
+</div>
+
+<div id="main">
+  <div id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+    <div id="loading-overlay">Processing frames…</div>
+    <div id="done-overlay">
+      <div>All done!</div>
+      <div style="font-size:13px;color:#aaa">Annotations saved. You may close this tab.</div>
+    </div>
+  </div>
+
+  <div id="sidebar">
+    <h3>Labels (0–9)</h3>
+    <div id="labels-list"></div>
+    <div id="shortcuts">
+      <span>0–9</span> label active box<br>
+      <span>Tab</span> cycle selection<br>
+      <span>Del</span> remove box<br>
+      <span>,</span> prev image<br>
+      <span>.</span> next image<br>
+      <span>Space</span> resume<br>
+      <span>Enter</span> next image<br>
+      <span>Esc</span> quit<br>
+      <span>RClick drag</span> draw box<br>
+      <span>LClick</span> select box<br>
+      <span>S</span> toggle skip mode
+    </div>
+  </div>
+</div>
+
+<div id="controls">
+  <button onclick="navigate('prev')">&larr; Prev (,)</button>
+  <button onclick="navigate('resume')">Resume (Space)</button>
+  <button class="primary" onclick="navigate('next')">Next (.) &rarr;</button>
+  <button class="skip on" onclick="navigate('toggle_skip')" id="toggle-skip">Turn On Skipping (S)</button>
+  <button class="danger" onclick="confirmQuit()">Quit (Esc)</button>
+  <span id="box-count"></span>
+</div>
+
+<div id="modal-overlay" id="modal-overlay">
+  <div id="modal">
+    <h3 id="modal-title">Enter name for label</h3>
+    <input id="modal-input" type="text" placeholder="label name…" />
+    <div class="modal-buttons">
+      <button onclick="cancelModal()">Cancel</button>
+      <button class="primary" onclick="confirmModal()">OK</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const img = new Image();
+
+let serverState = null;   // last state received from /api/state
+let localBoxes = [];      // [{x, y, w, h, label: str|null}]
+let activeIdx = -1;       // index into localBoxes, or -1
+let dragStart = null;     // {x, y} in image coords, or null
+let scaleX = 1, scaleY = 1;
+let pollTimer = null;
+
+const COLOR_UNLABELED = '#f55';
+const COLOR_LABELED   = '#4d4';
+const COLOR_ACTIVE    = '#ff0';
+
+// ─── Rendering ───────────────────────────────────────────────────────────────
+function redraw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0);
+
+  localBoxes.forEach((box, i) => {
+    const isActive = i === activeIdx;
+    ctx.strokeStyle = isActive ? COLOR_ACTIVE : (box.label !== null ? COLOR_LABELED : COLOR_UNLABELED);
+    ctx.lineWidth = isActive ? 3 : 2;
+    ctx.strokeRect(box.x, box.y, box.w, box.h);
+
+    if (box.label !== null) {
+      const name = serverState?.labels?.[box.label] ?? box.label;
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.font = 'bold 13px monospace';
+      ctx.fillText(`[${box.label}] ${name}`, box.x + 4, box.y + 16);
+    }
+  });
+
+  document.getElementById('box-count').textContent =
+    `${localBoxes.length} box${localBoxes.length !== 1 ? 'es' : ''}`;
+}
+
+// ─── Image loading ────────────────────────────────────────────────────────────
+function loadImage() {
+  img.onload = () => {
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    updateScale();
+    redraw();
+  };
+  img.src = '/api/image?' + Date.now(); // cache-bust
+}
+
+function updateScale() {
+  const rect = canvas.getBoundingClientRect();
+  scaleX = canvas.width / rect.width;
+  scaleY = canvas.height / rect.height;
+}
+
+window.addEventListener('resize', () => { updateScale(); redraw(); });
+
+// ─── State sync ───────────────────────────────────────────────────────────────
+function applyState(state) {
+  serverState = state;
+
+  document.getElementById('progress').textContent = `${state.processed} / ${state.total}`;
+  document.getElementById('current-key').textContent = state.key ?? '—';
+
+  renderLabels(state.labels);
+
+  document.getElementById('loading-overlay').classList.toggle('visible', state.loading);
+  document.getElementById('done-overlay').classList.toggle('visible', state.done && !state.loading);
+  skipButton = document.getElementById('toggle-skip');
+  if (state.skipping) {
+    skipButton.textContent = 'Turn Off Skipping';
+    skipButton.classList.remove('off');
+    skipButton.classList.add('on');
+  } else {
+    skipButton.textContent = 'Turn On Skipping';
+    skipButton.classList.remove('on');
+    skipButton.classList.add('off');
+  }
+
+  if (state.loading) {
+    schedulePoll();
+    return;
+  }
+
+  clearPoll();
+
+  // Initialise localBoxes from existing annotations, else from auto-detected blobs
+  const source = state.existing_annotations?.length > 0
+    ? state.existing_annotations
+    : state.blobs;
+
+  localBoxes = (source ?? []).map(b => ({
+    x: b.bbox[0], y: b.bbox[1], w: b.bbox[2], h: b.bbox[3],
+    label: b.label ?? null
+  }));
+
+  activeIdx = localBoxes.length > 0 ? 0 : -1;
+  loadImage();
+}
+
+function renderLabels(labels) {
+  const el = document.getElementById('labels-list');
+  el.innerHTML = '';
+  for (let i = 0; i <= 9; i++) {
+    const id = String(i);
+    const name = labels?.[id];
+    const div = document.createElement('div');
+    div.className = 'label-item' + (name ? '' : ' undefined');
+    div.innerHTML = `<span class="label-key">${id}</span><span class="label-name">${name ?? 'undefined'}</span>`;
+    el.appendChild(div);
+  }
+}
+
+// ─── Polling (while loading) ──────────────────────────────────────────────────
+function schedulePoll() {
+  clearPoll();
+  pollTimer = setTimeout(fetchState, 500);
+}
+
+function clearPoll() {
+  if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
+}
+
+async function fetchState() {
+  try {
+    const res = await fetch('/api/state');
+    const state = await res.json();
+    applyState(state);
+  } catch (e) {
+    schedulePoll(); // retry on error
+  }
+}
+
+// ─── Navigation / submit ──────────────────────────────────────────────────────
+async function navigate(action) {
+  const bboxes = localBoxes.map(b => ({ bbox: [b.x, b.y, b.w, b.h], label: b.label }));
+  try {
+    const res = await fetch('/api/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bboxes, action })
+    });
+    const state = await res.json();
+    applyState(state);
+  } catch (e) {
+    console.error('navigate failed', e);
+  }
+}
+
+function confirmQuit() {
+  if (window.confirm('Save and quit?')) navigate('quit');
+}
+
+// ─── Mouse: bounding box drawing / selection ──────────────────────────────────
+function clientToImage(cx, cy) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: Math.round((cx - rect.left) * scaleX),
+    y: Math.round((cy - rect.top)  * scaleY)
+  };
+}
+
+function boxDistance(box, mx, my) {
+  const { x, y, w, h } = box;
+  if (mx >= x && mx <= x+w && my >= y && my <= y+h) {
+    return Math.min(mx-x, x+w-mx, my-y, y+h-my);
+  }
+  const cx = Math.max(x, Math.min(mx, x+w));
+  const cy = Math.max(y, Math.min(my, y+h));
+  return Math.hypot(mx-cx, my-cy);
+}
+
+function setBoundsFromDrag(box, x0, y0, x1, y1) {
+  box.x = Math.min(x0, x1);
+  box.y = Math.min(y0, y1);
+  box.w = Math.abs(x1 - x0);
+  box.h = Math.abs(y1 - y0);
+}
+
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+canvas.addEventListener('mousedown', e => {
+  if (e.button !== 2) return;
+  e.preventDefault();
+  const { x, y } = clientToImage(e.clientX, e.clientY);
+  dragStart = { x, y };
+
+  if (activeIdx >= 0) {
+    // Reuse active box
+    setBoundsFromDrag(localBoxes[activeIdx], x, y, x, y);
+  } else {
+    localBoxes.push({ x, y, w: 0, h: 0, label: null });
+    activeIdx = localBoxes.length - 1;
+  }
+  redraw();
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (dragStart === null || activeIdx < 0) return;
+  const { x, y } = clientToImage(e.clientX, e.clientY);
+  setBoundsFromDrag(localBoxes[activeIdx], dragStart.x, dragStart.y, x, y);
+  redraw();
+});
+
+canvas.addEventListener('mouseup', e => {
+  if (e.button === 2) {
+    if (dragStart !== null && activeIdx >= 0) {
+      const box = localBoxes[activeIdx];
+      if (box.w * box.h < 500) {
+        localBoxes.splice(activeIdx, 1);
+        activeIdx = localBoxes.length > 0 ? 0 : -1;
+      }
+    }
+    dragStart = null;
+    redraw();
+  } else if (e.button === 0) {
+    const { x, y } = clientToImage(e.clientX, e.clientY);
+    let bestDist = Infinity, bestIdx = -1;
+    localBoxes.forEach((box, i) => {
+      const d = boxDistance(box, x, y);
+      if (d < bestDist) { bestDist = d; bestIdx = i; }
+    });
+    activeIdx = bestDist < 20 * Math.max(scaleX, scaleY) ? bestIdx : -1;
+    redraw();
+  }
+});
+
+// ─── Keyboard shortcuts ───────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  // Don't intercept keys when modal or text input is focused
+  if (document.getElementById('modal-overlay').classList.contains('visible')) return;
+  if (e.target.tagName === 'INPUT') return;
+
+  const key = e.key;
+
+  if (key >= '0' && key <= '9') {
+    e.preventDefault();
+    if (activeIdx < 0) return;
+    const labelId = key;
+    if (serverState?.labels?.[labelId] !== undefined) {
+      localBoxes[activeIdx].label = labelId;
+      redraw();
+    } else {
+      // Need to define this label first
+      openModal(labelId, () => {
+        localBoxes[activeIdx].label = labelId;
+        redraw();
+      });
+    }
+
+  } else if (key === 'Tab') {
+    e.preventDefault();
+    if (localBoxes.length === 0) return;
+    activeIdx = activeIdx < 0 ? 0 : (activeIdx + 1) % localBoxes.length;
+    redraw();
+
+  } else if (key === 'Delete' || key === 'Backspace') {
+    e.preventDefault();
+    if (activeIdx >= 0) {
+      localBoxes.splice(activeIdx, 1);
+      activeIdx = localBoxes.length > 0 ? Math.min(activeIdx, localBoxes.length - 1) : -1;
+      redraw();
+    }
+
+  } else if (key === ',') {
+    e.preventDefault();
+    navigate('prev');
+
+  } else if (key === '.') {
+    e.preventDefault();
+    navigate('next');
+
+  } else if (key === ' ') {
+    e.preventDefault();
+    navigate('resume');
+
+  } else if (key === 'Enter') {
+    e.preventDefault();
+    navigate('next');
+
+  } else if (key === 'Escape') {
+    e.preventDefault();
+    confirmQuit();
+  } else if (key === 'S' || key === 's') {
+    e.preventDefault();
+    navigate('toggle_skip');
+  }
+});
+
+// ─── Label name modal ─────────────────────────────────────────────────────────
+let _modalCallback = null;
+let _modalLabelId = null;
+
+function openModal(labelId, callback) {
+  _modalLabelId = labelId;
+  _modalCallback = callback;
+  document.getElementById('modal-title').textContent = `Enter name for label ${labelId}:`;
+  document.getElementById('modal-input').value = '';
+  document.getElementById('modal-overlay').classList.add('visible');
+  setTimeout(() => document.getElementById('modal-input').focus(), 50);
+}
+
+function cancelModal() {
+  document.getElementById('modal-overlay').classList.remove('visible');
+  _modalCallback = null;
+  _modalLabelId = null;
+}
+
+async function confirmModal() {
+  const name = document.getElementById('modal-input').value.trim();
+  if (!name) return;
+  document.getElementById('modal-overlay').classList.remove('visible');
+  // Save label name to server
+  await fetch('/api/labels', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: _modalLabelId, name })
+  });
+  // Update local serverState so renderLabels is correct immediately
+  if (serverState) serverState.labels[_modalLabelId] = name;
+  renderLabels(serverState?.labels ?? {});
+  if (_modalCallback) _modalCallback();
+  _modalCallback = null;
+  _modalLabelId = null;
+}
+
+document.getElementById('modal-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') confirmModal();
+  if (e.key === 'Escape') cancelModal();
+});
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+fetchState();
+</script>
+</body>
+</html>

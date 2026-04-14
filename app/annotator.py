@@ -1,22 +1,28 @@
 import argparse
 import json
 import os
+import signal
 import sys
+import threading
+import webbrowser
 from collections import deque
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from pprint import pprint
+from typing import Optional
 
 import cv2 as cv
 import numpy as np
 import yaml
+from flask import Flask, Response, jsonify, render_template, request
 
-from background_model import TimestampAwareBackgroundSubtractor, BoundingBox
+from background_model import BoundingBox, TimestampAwareBackgroundSubtractor
 from image_loader import get_all_timestamped_files_sorted
 
 ANNOTATION_FILE = "annotations.json"
 
 
-def load_annotations(path):
+def load_annotations(path: str | Path):
     if os.path.exists(path):
         with open(path, "r") as f:
             return json.load(f)
@@ -30,164 +36,297 @@ def save_annotations(path, data, through_key=None):
         json.dump(data, f, indent=2)
 
 
-def prompt_label_name(label_id):
-    name = input(f"Enter name for label {label_id}: ")
-    return name.strip()
+def _iou(b1: BoundingBox, b2: BoundingBox) -> float:
+    """Compute IoU between two bbox dicts (each with 'bbox': [x,y,w,h])."""
+    x1, y1, w1, h1 = b1.x, b1.y, b1.width, b1.height
+    x2, y2, w2, h2 = b2.x, b2.y, b2.width, b2.height
+    xi1, yi1 = max(x1, x2), max(y1, y2)
+    xi2, yi2 = min(x1 + w1, x2 + w2), min(y1 + h1, y2 + h2)
+    inter = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+    union = w1 * h1 + w2 * h2 - inter
+    return inter / union if union > 0 else 0.0
 
 
-class Interface(object):
-    COLOR_LABELED = (0, 255, 0)
-    COLOR_UNLABELED = (0, 0, 255)
-    COLOR_ACTIVE = (255, 255, 0)
+def _apply_prior_annotations(blobs: list[BoundingBox], prior_annots: list[BoundingBox], iou_threshold=0.5):
+    """Pre-populate blob labels from prior annotations using IoU matching."""
+    if not prior_annots or not blobs:
+        return
+    for blob in blobs:
+        best_iou, best_prior = 0.0, None
+        for prior in prior_annots:
+            iou = _iou(blob, prior)
+            if iou > best_iou:
+                best_iou, best_prior = iou, prior
+        if best_prior is not None and best_iou > iou_threshold:
+            blob.class_id = best_prior.class_id
 
-    def __init__(self, image: cv.Mat, bboxes: list[BoundingBox], labels_dict: dict):
-        self.image = image
-        self.annotations = list(bboxes)
-        self.labels_dict = labels_dict
-        self._active_bbox = None
-        self._drag_start = None
-        self.last_keypress = -1
 
-        cv.namedWindow("Interface", cv.WINDOW_AUTOSIZE)
-        cv.setMouseCallback("Interface", self.on_mouse)
+class AnnotatorState:
+    """All mutable state for the annotation session, protected by a lock."""
 
-        self.select_next()
+    def __init__(
+        self,
+        image_dir: Path,
+        bg_model: TimestampAwareBackgroundSubtractor,
+        prior_annotations: dict,
+        skip_no_motion: bool,
+        paused: bool,
+    ):
+        self.lock = threading.Lock()
 
-    def on_mouse(self, event, x, y, flags, param):
-        if event == cv.EVENT_RBUTTONDOWN:
-            self._drag_start = (x, y)
-            # create a new annotation/new bbox. Overwriting an existing one if one was already
-            # selected.
-            if self._active_bbox is not None:
-                self._active_bbox.set_bounds(x, y, x, y)
-            else:
-                self._active_bbox = BoundingBox(x, y, 0, 0)
-        elif event == cv.EVENT_MOUSEMOVE:
-            if self._drag_start is not None:
-                self._active_bbox.set_bounds(*self._drag_start, x, y)
-        elif event == cv.EVENT_RBUTTONUP:
-            self._drag_start = None
-            # Done dragging. Pop this bbox from any in the current list; will add it back in a
-            # moment if it was big enough
-            if self._active_bbox in self.annotations:
-                self.annotations.remove(self._active_bbox)
-            if self._active_bbox.area < 500:
-                self._active_bbox = None
-            else:
-                # add (or re-add) this to the list. keep it active.
-                self.annotations.append(self._active_bbox)
-        elif event == cv.EVENT_LBUTTONUP:
-            self.save_active()
-            # Select whatever bbox was clicked, or deselect if none is nearby
-            dist, closest = float("inf"), None
-            for bbox in self.annotations:
-                d = bbox.distance(x, y)
-                if d < dist:
-                    dist, closest = d, bbox
-            if dist < 5:
-                self._active_bbox = closest
-            else:
-                self._active_bbox = None
+        self.image_dir = image_dir
+        self.annot_file = image_dir / ANNOTATION_FILE
+        self.bg_model = bg_model
+        self.prior_annotations = prior_annotations
 
-    def init_with_prior_annotations(self, prior_annots, iou_threshold=0.5):
-        if len(prior_annots) == 0 or len(self.annotations) == 0:
-            return
-        for blob in self.annotations:
-            # Check if this blob matches any prior annotation (by IoU)
-            matched_prior = None
-            best_iou = 0.0
-            for prior in prior_annots:
-                iou = BoundingBox.iou(BoundingBox(*prior["bbox"]), blob)
-                if iou > best_iou:
-                    best_iou = iou
-                    matched_prior = prior
-            if matched_prior is not None and best_iou > iou_threshold:
-                blob.class_id = matched_prior["label"]
+        self.annotations = load_annotations(self.annot_file)
+        self.labels = self.annotations.setdefault("labels", {})
 
-    def refresh_display(self):
-        display = self.image.copy()
-        for blob in self.annotations:
-            if blob is self._active_bbox:
-                continue
+        all_files = list(get_all_timestamped_files_sorted(image_dir))
+        self._total_files = len(all_files)
+        self._file_iter = self._iter_files()
+        self._recent_skipped = deque()
 
-            blob.draw(
-                display,
-                color=(
-                    Interface.COLOR_LABELED
-                    if blob.class_id is not None
-                    else Interface.COLOR_UNLABELED
-                ),
+        self.history_left: deque = deque(maxlen=200)
+        self.history_right: deque = deque(maxlen=200)
+
+        self.current_key: str | None = None
+        self.current_img_bytes: bytes | None = None
+        self.current_bboxes: list[BoundingBox] = []
+
+        self._loading: bool = False
+        self._done: bool = False
+        self._paused: bool = paused
+        self._skipping = skip_no_motion
+        self._images_processed: int = 0
+
+    def _iter_files(self):
+        """Yield (timestamp, filename, needs_annotation) for each file."""
+        up_through = self.annotations.get("through", None)
+        skipping = up_through is not None
+        for time_and_file in get_all_timestamped_files_sorted(self.image_dir):
+            timestamp, filename = time_and_file
+            key = str(filename.relative_to(self.image_dir))
+            if up_through is None or key >= up_through:
+                skipping = False
+            needs_annotation = key not in self.annotations or not isinstance(
+                self.annotations[key], list
             )
+            yield timestamp, filename, needs_annotation and not skipping
 
-        if self._active_bbox is not None:
-            self._active_bbox.draw(display, color=Interface.COLOR_ACTIVE)
+    def _encode_image(self, img) -> bytes:
+        ok, buf = cv.imencode(".jpg", img)
+        if not ok:
+            raise RuntimeError("Failed to encode image as JPEG")
+        return buf.tobytes()
 
-        cv.imshow("Interface", display)
+    def _process_image(self, timestamp, filename) -> tuple[bytes, list[BoundingBox]]:
+        """Run the background model on one image and return (jpeg_bytes, bboxes)."""
+        img = cv.imread(str(filename))
+        _, blobs = self.bg_model.applyWithStats(img, timestamp)
+        blobs = [b for b in blobs if np.mean(b.shadow_correlation()) < self.bg_model.shadow_correlation_threshold]
+        bboxes = [b.bbox for b in blobs]
+        img_bytes = self._encode_image(img)
+        return img_bytes, bboxes
 
-    def save_active(self):
-        if self._active_bbox is not None:
-            if self._active_bbox not in self.annotations:
-                self.annotations.append(self._active_bbox)
+    def _load_frame(self, key, img_bytes, bboxes):
+        """Set the current frame (called under lock)."""
+        self.current_key = key
+        self.current_img_bytes = img_bytes
+        self.current_bboxes = bboxes
+        self._loading = False
 
-    def select_next(self):
-        self.save_active()
-        if len(self.annotations) > 0:
-            if self._active_bbox is not None:
-                idx = self.annotations.index(self._active_bbox)
-                idx = (idx + 1) % len(self.annotations)
-                self._active_bbox = self.annotations[idx]
+    def _do_load_next_from_iterator(self):
+        """
+        Advance through the file iterator until the next annotatable frame.
+        Designed to run on a background thread when burn-through is needed.
+        """
+        try:
+            while True:
+                timestamp, filename, needs_annotation = next(self._file_iter)
+                key = str(filename.relative_to(self.image_dir))
+                with self.lock:
+                    self.current_key = key
+
+                if not needs_annotation:
+                    self._recent_skipped.append((timestamp, filename))
+                    continue
+
+                # Burn through recently-skipped files to update the bg model
+                while self._recent_skipped:
+                    ts, fn = self._recent_skipped.popleft()
+                    if ts >= timestamp - 2 * self.bg_model.history_seconds:
+                        img = cv.imread(str(fn))
+                        self.bg_model.applyWithStats(img, ts)
+
+                self._images_processed += 1
+                if self._images_processed % 100 == 0:
+                    with self.lock:
+                        save_annotations(
+                            self.annot_file, self.annotations, through_key=key
+                        )
+
+                img_bytes, blobs_dicts = self._process_image(timestamp, filename)
+
+                # Apply prior annotations via IoU matching
+                prior = self.prior_annotations.get(key)
+                if prior and key not in self.annotations:
+                    _apply_prior_annotations(blobs_dicts, prior)
+
+                if self._skipping and len(blobs_dicts) == 0:
+                    # Skip this frame silently
+                    with self.lock:
+                        self.history_left.append((key, img_bytes, blobs_dicts))
+                    continue
+
+                # We have a frame to show
+                with self.lock:
+                    self.history_left.append(
+                        (self.current_key, self.current_img_bytes, self.current_bboxes)
+                    )
+                    self._load_frame(key, img_bytes, blobs_dicts)
+                return
+
+        except StopIteration:
+            with self.lock:
+                self._done = True
+                self._loading = False
+
+    def _start_load_next(self):
+        """
+        Begin loading the next frame from the iterator. Sets _loading=True and
+        spawns a background thread to do the work.
+        """
+        self._loading = True
+        t = threading.Thread(target=self._do_load_next_from_iterator, daemon=True)
+        t.start()
+
+    def advance(self, action: str):
+        """
+        Navigate to a new frame based on action. Must be called under self.lock.
+        'prev', 'next', 'resume', 'toggle_skip', are navigation actions; 'quit' exits.
+        """
+        # TODO - the ,/. logic in browser skips many frames, jumping only between those that had motion.
+        if action == "prev":
+            if self.history_left:
+                self.history_right.append(
+                    (self.current_key, self.current_img_bytes, self.current_bboxes)
+                )
+                key, img_bytes, blobs_dicts = self.history_left.pop()
+                self._load_frame(key, img_bytes, blobs_dicts)
+
+        elif action == "next":
+            if self.history_right:
+                self.history_left.append(
+                    (self.current_key, self.current_img_bytes, self.current_bboxes)
+                )
+                key, img_bytes, blobs_dicts = self.history_right.pop()
+                self._load_frame(key, img_bytes, blobs_dicts)
             else:
-                self._active_bbox = self.annotations[0]
+                self._start_load_next()
 
-    def run_interactive(self, extra_quit_keys=None) -> None | list[BoundingBox]:
-        quit_keys = [3, 13, 27]  # enter, return, escape
-        if extra_quit_keys is not None:
-            quit_keys.extend(extra_quit_keys)
+        elif action == "resume":
+            while self.history_right:
+                self.history_left.append(
+                    (self.current_key, self.current_img_bytes, self.current_bboxes)
+                )
+                key, img_bytes, blobs_dicts = self.history_right.pop()
+                self._load_frame(key, img_bytes, blobs_dicts)
+            self._paused = False
+            self._start_load_next()
 
-        while True:
-            self.refresh_display()
-            self.last_keypress = cv.waitKey(10)
-            if ord("0") <= self.last_keypress <= ord("9"):
-                # Label whatever is active
-                if self._active_bbox is not None:
-                    self._active_bbox.class_id = chr(self.last_keypress)
-                    if self._active_bbox not in self.annotations:
-                        self.annotations.append(self._active_bbox)
-            elif self.last_keypress in [0, 8, 40, 127]:
-                # Delete or backspace
-                if self._active_bbox is not None:
-                    if self._active_bbox in self.annotations:
-                        self.annotations.remove(self._active_bbox)
-                    self._active_bbox = None
-                self.select_next()
-            elif self.last_keypress == 9:
-                # tab -> cycle
-                self.select_next()
-            elif self.last_keypress in quit_keys:
-                return [b for b in self.annotations if b.class_id is not None]
-            elif self.last_keypress != -1:
-                print(f"WTF? {self.last_keypress} pressed")
+        elif action == "toggle_skip":
+            self._skipping = not self._skipping
 
-
-def iter_files_with_flags(annotations, image_dir):
-    up_through = annotations.get("through", None)
-    skipping = up_through is not None
-    for time_and_file in get_all_timestamped_files_sorted(image_dir):
-        timestamp, filename = time_and_file
-        key = str(filename.relative_to(image_dir))
-        if up_through is None or key >= up_through:
-            skipping = False
-
-        needs_annotation = key not in annotations or not isinstance(
-            annotations[key], list
-        )
-        # Hack: old annotations may exist but involve a label that has since changed
-        if not needs_annotation:
-            needs_annotation = any(
-                a["label"] in ["0", "4", "2", "6", "7"] for a in annotations[key]
+        elif action == "quit":
+            save_annotations(
+                self.annot_file, self.annotations, through_key=self.current_key
             )
+            self._done = True
+            threading.Thread(
+                target=lambda: os.kill(os.getpid(), signal.SIGINT), daemon=True
+            ).start()
 
-        yield timestamp, filename, needs_annotation and not skipping
+    def get_state_dict(self) -> dict:
+        """Return a JSON-serializable snapshot of the current state (call under lock)."""
+        existing = self.annotations.get(self.current_key)
+        if not isinstance(existing, list):
+            existing = []
+        return {
+            "key": self.current_key,
+            "processed": self._images_processed,
+            "total": self._total_files,
+            "blobs": [bbox.to_dict() for bbox in self.current_bboxes],
+            "existing_annotations": existing,
+            "labels": self.labels,
+            "loading": self._loading,
+            "skipping": self._skipping,
+            "done": self._done,
+        }
+
+    def save_bboxes(self, key: str, bboxes: list[dict]):
+        """Persist submitted bboxes for the given key (call under lock)."""
+        labeled = [b for b in bboxes if b["label"] is not None]
+        if labeled:
+            self.annotations[key] = labeled
+        elif key in self.annotations:
+            del self.annotations[key]
+
+
+def create_app(state: AnnotatorState) -> Flask:
+    app = Flask(__name__, template_folder="templates")
+    # Suppress Flask's default request logging for a cleaner terminal
+    import logging
+
+    log = logging.getLogger("werkzeug")
+    log.setLevel(logging.WARNING)
+
+    @app.route("/")
+    def index():
+        return render_template("annotator.html")
+
+    @app.route("/api/state")
+    def api_state():
+        with state.lock:
+            return jsonify(state.get_state_dict())
+
+    @app.route("/api/image")
+    def api_image():
+        img_bytes = state.current_img_bytes
+        if img_bytes is None:
+            return Response(status=204)
+        return Response(img_bytes, mimetype="image/jpeg")
+
+    @app.route("/api/submit", methods=["POST"])
+    def api_submit():
+        data = request.get_json()
+        bboxes = data.get("bboxes", [])
+        action = data.get("action", "next")
+        with state.lock:
+            if state.current_key is not None:
+                state.save_bboxes(state.current_key, bboxes)
+            state.advance(action)
+            return jsonify(state.get_state_dict())
+
+    @app.route("/api/labels", methods=["POST"])
+    def api_labels():
+        data = request.get_json()
+        label_id = str(data["id"])
+        name = str(data["name"]).strip()
+        with state.lock:
+            state.labels[label_id] = name
+            save_annotations(
+                state.annot_file, state.annotations, through_key=state.current_key
+            )
+            return jsonify({"labels": state.labels})
+
+    @app.route("/api/quit", methods=["POST"])
+    def api_quit():
+        with state.lock:
+            state.advance("quit")
+        return jsonify({"status": "shutting_down"})
+
+    return app
 
 
 def main(
@@ -197,112 +336,36 @@ def main(
     skip_no_motion: bool = False,
     paused: bool = False,
 ):
-    annot_file = image_dir / ANNOTATION_FILE
-    annotations: dict[str, dict | list] = load_annotations(annot_file)
-    labels = annotations.setdefault("labels", {})
+    state = AnnotatorState(
+        image_dir, bg_model, prior_annotations, skip_no_motion, paused
+    )
 
-    # As we iterate, we only load images from disk if (a) they need processing or (b) they are
-    # part of the recent history of a file that needs processing, such that the background model
-    # is up to date. When we skip a file, we add it to recent_skipped. When we process a file,
-    # we maybe need to load some of the recent_skipped files to update the background model. When
-    # an image is processed, we clear recent_skipped. This way, recent_skipped always contains
-    # the set of files *since* the last processed file.
-    recent_skipped = deque()
-    history_left = deque(maxlen=200)
-    history_right = deque(maxlen=200)
+    pprint(state.labels)
 
-    pprint(labels)
-    quit_requested = False
-    for i, (timestamp, filename, needs_annotation) in enumerate(
-        iter_files_with_flags(annotations, image_dir)
-    ):
-        if quit_requested:
-            break
+    # Load the first frame before starting the server
+    state._do_load_next_from_iterator()
 
-        key = str(filename.relative_to(image_dir))
-        if not needs_annotation:
-            recent_skipped.append((timestamp, filename))
-            continue
+    if state._done:
+        print("No images to annotate.")
+        return
 
-        # Burn through all skipped files and use any that are recent enough to update the BG model
-        while recent_skipped:
-            ts, fn = recent_skipped.popleft()
-            skipped_key = str(fn.relative_to(image_dir))
-            # If skipped file is part of this file's context, load it to update the model
-            if ts >= timestamp - 2 * bg_model.history_seconds:
-                img = cv.imread(str(fn))
-                _, blobs = bg_model.applyWithStats(img, ts)
-                history_left.append((skipped_key, img, blobs))
+    app = create_app(state)
 
-        if i % 100 == 0:
-            print(f"Completed thru {i} images, current: {filename}")
-            save_annotations(annot_file, annotations, through_key=key)
+    url = "http://127.0.0.1:5000"
+    print(f"Starting annotation server at {url}")
+    # Open browser slightly after server starts
+    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
-        # Once we reach here, we can assume that the BG model is up-to-date and that we just need
-        # to load and process this file.
-        img = cv.imread(str(filename))
-
-        _, blobs = bg_model.applyWithStats(img, timestamp)
-
-        # Skip blobs that are almost certainly shadows
-        blobs = [b for b in blobs if np.mean(b.shadow_correlation()) < 0.5]
-
-        if skip_no_motion:
-            if len(blobs) == 0:
-                needs_annotation = False
-                cv.imshow("Interface", img)
-                k = cv.waitKey(1)
-                if k == ord(" "):
-                    paused = True
-
-        paused = paused or needs_annotation
-        # loop preconditions:
-        # - (key, img, blobs) is 'current'
-        # - history_right is empty, history_left is strictly earlier
-        # after the loop, this must all remain true. during the pause loop, history will get weird
-        while paused:
-            if key in annotations:
-                init_bboxes = [BoundingBox.from_dict(a) for a in annotations[key]]
-            else:
-                init_bboxes = [blob.bbox for blob in blobs]
-            interface = Interface(img, init_bboxes, labels)
-            if key in prior_annotations and key not in annotations:
-                interface.init_with_prior_annotations(prior_annotations[key])
-            result = interface.run_interactive(
-                extra_quit_keys=[ord(","), ord("."), ord(" ")]
+    try:
+        app.run(host="127.0.0.1", port=5000, threaded=True, use_reloader=False)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        with state.lock:
+            save_annotations(
+                state.annot_file, state.annotations, through_key=state.current_key
             )
-            if interface.last_keypress == 27:
-                quit_requested = True
-                break
-            elif result is not None and len(result) > 0:
-                annotations[key] = [b.to_dict() for b in result]
-            elif len(result) == 0 and key in annotations:
-                del annotations[key]
-
-            if interface.last_keypress == ord(" "):
-                while len(history_right) > 0:
-                    history_left.append((key, img, blobs))
-                    key, img, blobs = history_right.pop()
-                paused = False
-            elif interface.last_keypress == ord(","):
-                if len(history_left) > 0:
-                    history_right.append((key, img, blobs))
-                    key, img, blobs = history_left.pop()
-            elif interface.last_keypress == ord("."):
-                if len(history_right) > 0:
-                    history_left.append((key, img, blobs))
-                    key, img, blobs = history_right.pop()
-                else:
-                    # This breaks the current 'paused' loop and returns control to the outer 'for'
-                    # loop, thus loading the next image that is not yet loaded, but then we'll hit
-                    # the 'while paused' block again on the next frame
-                    break
-
-        history_left.append((key, img, blobs))
-
-    cv.destroyAllWindows()
-    save_annotations(annot_file, annotations, through_key=key)
-    print(f"Annotations saved to {annot_file}")
+        print(f"Annotations saved to {state.annot_file}")
 
 
 if __name__ == "__main__":
