@@ -43,18 +43,6 @@
     image-rendering: pixelated;
   }
 
-  #loading-overlay {
-    display: none;
-    position: absolute;
-    inset: 0;
-    background: rgba(0,0,0,0.65);
-    align-items: center;
-    justify-content: center;
-    font-size: 18px;
-    color: #fff;
-  }
-  #loading-overlay.visible { display: flex; }
-
   /* Progress bar shown while auto-advancing through no-motion frames */
   #autoadvance-bar {
     display: none;
@@ -246,7 +234,6 @@
 <div id="main">
   <div id="canvas-wrap">
     <canvas id="canvas"></canvas>
-    <div id="loading-overlay">Processing frames…</div>
     <div id="autoadvance-bar"><div id="autoadvance-fill"></div></div>
     <div id="done-overlay">
       <div>All done!</div>
@@ -470,7 +457,6 @@ function applyState(state) {
     skipBtn.classList.remove('on'); skipBtn.classList.add('off');
   }
 
-  document.getElementById('loading-overlay').classList.toggle('visible', state.loading);
   document.getElementById('done-overlay').classList.toggle('visible', state.done && !state.loading);
 
   if (state.loading) {
