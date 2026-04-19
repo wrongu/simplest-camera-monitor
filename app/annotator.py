@@ -55,7 +55,7 @@ class AnnotationFile:
     """Represents the full annotations.json on disk."""
 
     labels: dict = field(default_factory=dict)  # {label_id: name}
-    through: Optional[str] = None               # last-processed image key
+    through: Optional[str] = None  # last-processed image key
     images: dict = field(default_factory=dict)  # {image_key: list[LabeledBox]}
 
     @classmethod
@@ -94,12 +94,12 @@ class FrameState:
     key: Optional[str]
     file_index: int
     total: int
-    blobs: list           # list[LabeledBox]
+    blobs: list  # list[LabeledBox]
     existing_annotations: list  # list[LabeledBox]
     labels: dict
     loading: bool
     skipping: bool
-    needs_pause: bool     # False → frontend should auto-advance after its configured delay
+    needs_pause: bool  # False → frontend should auto-advance after its configured delay
     done: bool
 
     def to_dict(self) -> dict:
@@ -121,7 +121,7 @@ class FrameState:
 class SubmitRequest:
     """Parsed body of POST /api/submit."""
 
-    bboxes: list   # list[LabeledBox]
+    bboxes: list  # list[LabeledBox]
     action: str
 
     @classmethod
@@ -145,9 +145,7 @@ def _iou(b1: LabeledBox, b2: LabeledBox) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def _apply_prior_annotations(
-    blobs: list, prior_annots: list, iou_threshold: float = 0.5
-):
+def _apply_prior_annotations(blobs: list, prior_annots: list, iou_threshold: float = 0.5):
     """Pre-populate blob labels from a prior annotation set via IoU matching."""
     for blob in blobs:
         best_iou, best_label = 0.0, None
@@ -200,7 +198,7 @@ class AnnotatorState:
         self._recent_skipped: deque = deque()
         self._populate_recent_skipped_for_warmup()
 
-        # Prefetch cache: str(filename) → bytes (raw JPEG) or _PREFETCH_PENDING.
+        # Prefetch cache: str(filename) → tuple[bytes (raw JPEG), cv.Mat (loaded img)] or _PREFETCH_PENDING.
         self._prefetch_cache: dict = {}
 
         self.history_left: deque = deque(maxlen=200)
@@ -208,7 +206,7 @@ class AnnotatorState:
 
         self.current_key: Optional[str] = None
         self.current_img_bytes: Optional[bytes] = None
-        self.current_bboxes: list = []          # list[LabeledBox]
+        self.current_bboxes: list = []  # list[LabeledBox]
         self.current_needs_pause: bool = True
 
         self._loading: bool = False
@@ -255,7 +253,9 @@ class AnnotatorState:
     def _do_prefetch(self, fn: Path):
         """Background thread: read a file from disk into the prefetch cache."""
         try:
-            self._prefetch_cache[str(fn)] = fn.read_bytes()
+            byt = fn.read_bytes()
+            img = cv.imdecode(np.frombuffer(byt, np.uint8), cv.IMREAD_COLOR)
+            self._prefetch_cache[str(fn)] = byt, img
         except Exception:
             self._prefetch_cache.pop(str(fn), None)
 
@@ -267,7 +267,7 @@ class AnnotatorState:
         # Evict stale entries: keep only files from the current iterator position forward.
         upcoming = {
             str(fn)
-            for _, fn in self._all_files[self._iter_idx: self._iter_idx + self.PREFETCH_AHEAD * 2]
+            for _, fn in self._all_files[self._iter_idx : self._iter_idx + self.PREFETCH_AHEAD * 2]
         }
         stale = [k for k in self._prefetch_cache if k not in upcoming]
         for k in stale:
@@ -285,9 +285,7 @@ class AnnotatorState:
             fn_str = str(fn)
             if fn_str not in self._prefetch_cache:
                 self._prefetch_cache[fn_str] = _PREFETCH_PENDING
-                threading.Thread(
-                    target=self._do_prefetch, args=(fn,), daemon=True
-                ).start()
+                threading.Thread(target=self._do_prefetch, args=(fn,), daemon=True).start()
             launched += 1
 
     # ── Image processing ──────────────────────────────────────────────────────
@@ -304,23 +302,22 @@ class AnnotatorState:
         """
         fn_str = str(filename)
         cached = self._prefetch_cache.pop(fn_str, None)
-        if isinstance(cached, bytes):
-            raw_bytes = cached
+        if isinstance(cached, tuple):
+            byt, img = cached
         else:
             # Either not prefetched yet, or prefetch thread still running — read directly.
-            raw_bytes = filename.read_bytes()
-
-        # Decode to BGR array for the background model.
-        buf = np.frombuffer(raw_bytes, dtype=np.uint8)
-        img = cv.imdecode(buf, cv.IMREAD_COLOR)
+            byt = filename.read_bytes()
+            # Decode to BGR array for the background model.
+            img = cv.imdecode(np.frombuffer(byt, dtype=np.uint8), cv.IMREAD_COLOR)
 
         _, blobs = self.bg_model.applyWithStats(img, timestamp)
         blobs = [
-            b for b in blobs
+            b
+            for b in blobs
             if np.mean(b.shadow_correlation()) < self.bg_model.shadow_correlation_threshold
         ]
         bboxes = [LabeledBox.from_bbox(b.bbox) for b in blobs]
-        return raw_bytes, bboxes
+        return byt, bboxes
 
     def _load_frame(self, key: str, img_bytes: bytes, bboxes: list, needs_pause: bool):
         """Set the current frame. Must be called under self.lock."""
@@ -368,9 +365,8 @@ class AnnotatorState:
                 if ts >= timestamp - 2 * self.bg_model.history_seconds:
                     # Try cache first to avoid a redundant disk read.
                     cached = self._prefetch_cache.pop(str(fn), None)
-                    if isinstance(cached, bytes):
-                        buf = np.frombuffer(cached, dtype=np.uint8)
-                        img = cv.imdecode(buf, cv.IMREAD_COLOR)
+                    if isinstance(cached, tuple):
+                        _, img = cached
                     else:
                         img = cv.imread(str(fn))
                     self.bg_model.applyWithStats(img, ts)
@@ -404,9 +400,7 @@ class AnnotatorState:
     def _start_load_next(self):
         """Set loading=True and spawn a background thread to load the next frame."""
         self._loading = True
-        threading.Thread(
-            target=self._do_load_next_from_iterator, daemon=True
-        ).start()
+        threading.Thread(target=self._do_load_next_from_iterator, daemon=True).start()
 
     # ── Navigation ────────────────────────────────────────────────────────────
 
@@ -492,6 +486,7 @@ def create_app(state: AnnotatorState) -> Flask:
     app = Flask(__name__, template_folder="templates")
 
     import logging
+
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
     @app.route("/")
@@ -548,9 +543,7 @@ def main(
     skip_no_motion: bool = False,
     paused: bool = False,
 ):
-    state = AnnotatorState(
-        image_dir, bg_model, prior_annotations, skip_no_motion, paused
-    )
+    state = AnnotatorState(image_dir, bg_model, prior_annotations, skip_no_motion, paused)
     pprint(state.annot.labels)
 
     # Load the first frame synchronously before starting the server.
@@ -578,9 +571,7 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Image annotation tool")
     parser.add_argument("image_dir", type=Path, help="Directory with images")
-    parser.add_argument(
-        "bg_model_config", type=Path, help="Path to background model config"
-    )
+    parser.add_argument("bg_model_config", type=Path, help="Path to background model config")
     parser.add_argument(
         "--prior-annotations",
         default=None,
@@ -624,12 +615,9 @@ if __name__ == "__main__":
         morph_thresh=bg_config["morph_thresh"],
         morph_iters=bg_config["morph_iters"],
         default_fps=bg_config["default_fps"],
-        region_of_interest=cv.imread(
-            bg_config["region_of_interest"], cv.IMREAD_GRAYSCALE
-        ),
-        night_mode_kwargs={
-            k[6:]: v for k, v in bg_config.items() if k.startswith("night_")
-        },
+        region_of_interest=cv.imread(bg_config["region_of_interest"], cv.IMREAD_GRAYSCALE),
+        resize_scale=bg_config["resize_scale"],
+        night_mode_kwargs={k[6:]: v for k, v in bg_config.items() if k.startswith("night_")},
     )
 
     prior_annotations: dict = {}

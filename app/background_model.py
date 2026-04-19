@@ -1,7 +1,7 @@
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Self
 
 import cv2 as cv
 import numpy as np
@@ -14,6 +14,13 @@ class BoundingBox:
     width: int
     height: int
     class_id: Optional[str] = None
+
+    def unscale(self, img_scale: float) -> Self:
+        self.x = int(round(self.x / img_scale))
+        self.y = int(round(self.y / img_scale))
+        self.width = int(round(self.width / img_scale))
+        self.height = int(round(self.height / img_scale))
+        return self
 
     def to_dict(self) -> dict:
         return {
@@ -78,9 +85,7 @@ class BoundingBox:
         return intersection / union
 
     def draw(self, img: cv.Mat, color: tuple[int, int, int]) -> cv.Mat:
-        cv.rectangle(
-            img, (self.x, self.y), (self.x + self.width, self.y + self.height), color, 2
-        )
+        cv.rectangle(img, (self.x, self.y), (self.x + self.width, self.y + self.height), color, 2)
         cv.putText(
             img,
             f"{self.class_id}",
@@ -102,14 +107,10 @@ class ForegroundBlob:
     def shadow_correlation(self) -> tuple[float, float, float]:
         bg_bgr = self.background[self.mask > 0]
         im_bgr = self.image[self.mask > 0]
-        return tuple(
-            np.corrcoef(im, bg)[0, 1].item() for im, bg in zip(im_bgr.T, bg_bgr.T)
-        )
+        return tuple(np.corrcoef(im, bg)[0, 1].item() for im, bg in zip(im_bgr.T, bg_bgr.T))
 
 
-def _is_night_mode_image(
-    img: cv.Mat, grayness_threshold: float = 0.01, subsample: int = 8
-) -> bool:
+def _is_night_mode_image(img: cv.Mat, grayness_threshold: float = 0.01, subsample: int = 8) -> bool:
     img = img[::subsample, ::subsample]
     grayified = cv.cvtColor(cv.cvtColor(img, cv.COLOR_BGR2GRAY), cv.COLOR_GRAY2BGR)
     diff = np.abs(grayified / 255 - img / 255)
@@ -121,13 +122,9 @@ class MorphologyFn:
     frac_threshold: float
     iterations: int
 
-    def __init__(
-        self, kern_radius: int = 5, frac_threshold: float = 0.5, iterations: int = 1
-    ):
+    def __init__(self, kern_radius: int = 5, frac_threshold: float = 0.5, iterations: int = 1):
         kernel_size = 2 * kern_radius + 1
-        self.kernel = cv.getStructuringElement(
-            cv.MORPH_ELLIPSE, (kernel_size, kernel_size)
-        )
+        self.kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (kernel_size, kernel_size))
         self.frac_threshold = frac_threshold
         self.iterations = iterations
 
@@ -138,9 +135,7 @@ class MorphologyFn:
     @radius.setter
     def radius(self, r: int):
         kernel_size = 2 * r + 1
-        self.kernel = cv.getStructuringElement(
-            cv.MORPH_ELLIPSE, (kernel_size, kernel_size)
-        )
+        self.kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (kernel_size, kernel_size))
 
     def __call__(self, img: cv.Mat) -> cv.Mat:
         cleaned = img.copy() / 255
@@ -166,9 +161,11 @@ class TimestampAwareBackgroundSubtractor(object):
         default_fps: float = 0.1,
         prep_hist_eq: float = 0.5,
         prep_blur: int = 3,
+        resize_scale: float = 1.0,
         region_of_interest: Optional[cv.Mat] = None,
         night_mode_kwargs: Optional[dict] = None,
         debug_dir: Optional[Path] = None,
+        **extras,
     ):
         # Parameters for the OpenCV background model
         self.history_seconds = history_seconds
@@ -180,6 +177,7 @@ class TimestampAwareBackgroundSubtractor(object):
         self.update_fps(delta_t=1.0 / default_fps)
         self.prep_hist_eq = prep_hist_eq
         self.prep_blur = prep_blur
+        self.resize_scale = resize_scale
 
         # Parameters for post-processing cleanup
         self.area_threshold = area_threshold
@@ -192,9 +190,7 @@ class TimestampAwareBackgroundSubtractor(object):
 
         self.night_mode = False
         self._night_mode_kwargs = night_mode_kwargs or {}
-        self._day_mode_kwargs = {
-            k: self.__dict__[k] for k in self._night_mode_kwargs.keys()
-        }
+        self._day_mode_kwargs = {k: self.__dict__[k] for k in self._night_mode_kwargs.keys()}
 
         self.model = cv.createBackgroundSubtractorMOG2(
             history=int(history_seconds * default_fps),
@@ -202,8 +198,18 @@ class TimestampAwareBackgroundSubtractor(object):
             detectShadows=self.detect_shadows,
         )
 
+        if isinstance(region_of_interest, str) or isinstance(region_of_interest, Path):
+            region_of_interest = cv.imread(str(region_of_interest))
+
         self.roi = region_of_interest
         if self.roi is not None:
+            self.roi = cv.resize(
+                self.roi,
+                dsize=None,
+                fx=self.resize_scale,
+                fy=self.resize_scale,
+                interpolation=cv.INTER_AREA,
+            )
             self.roi = self.roi / max(1.0, np.max(self.roi))
 
         self.debug_dir = debug_dir
@@ -235,6 +241,8 @@ class TimestampAwareBackgroundSubtractor(object):
                 case "default_fps":
                     self.default_fps = float(v)
                     self.update_fps(delta_t=1.0 / self.default_fps, ema_alpha=1.0)
+                case "resize_scale":
+                    self.resize_scale = float(v)
 
     def update_fps(self, delta_t: float, ema_alpha: float = 0.1):
         # Exponential moving average, or reset to default if delta_t is very large
@@ -244,6 +252,15 @@ class TimestampAwareBackgroundSubtractor(object):
             self.fps += (1.0 / delta_t - self.fps) * ema_alpha
 
     def preprocess(self, img: cv.Mat) -> cv.Mat:
+        if self.resize_scale < 1.0:
+            img = cv.resize(
+                img,
+                dsize=None,
+                fx=self.resize_scale,
+                fy=self.resize_scale,
+                interpolation=cv.INTER_AREA,
+            )
+
         if self.prep_blur > 0:
             img = cv.GaussianBlur(
                 img,
@@ -258,9 +275,9 @@ class TimestampAwareBackgroundSubtractor(object):
         hist_l = np.bincount(l.ravel(), minlength=256)
         cumul_l = np.cumsum(hist_l)
         eq_lut = cumul_l * 255 / cumul_l[-1]
-        lut = np.round(
-            id_lut * (1 - self.prep_hist_eq) + eq_lut * self.prep_hist_eq
-        ).astype(np.uint8)
+        lut = np.round(id_lut * (1 - self.prep_hist_eq) + eq_lut * self.prep_hist_eq).astype(
+            np.uint8
+        )
         l = cv.LUT(l, lut=lut)
         return cv.cvtColor(cv.merge((l, a, b)), cv.COLOR_LAB2BGR)
 
@@ -285,9 +302,7 @@ class TimestampAwareBackgroundSubtractor(object):
             # current image as the entire background
             learning_rate = 1.0
             self.night_mode = is_night_mode
-            new_kwargs = (
-                self._night_mode_kwargs if is_night_mode else self._day_mode_kwargs
-            )
+            new_kwargs = self._night_mode_kwargs if is_night_mode else self._day_mode_kwargs
             self.setArgs(**new_kwargs)
 
         img = self.preprocess(img)
@@ -332,7 +347,7 @@ class TimestampAwareBackgroundSubtractor(object):
             # background and image object references but has a different mask
             blobs.append(
                 ForegroundBlob(
-                    bbox=BoundingBox(*stats[i, :4]),
+                    bbox=BoundingBox(*stats[i, :4]).unscale(self.resize_scale),
                     background=background,
                     image=img,
                     mask=np.array(labels == i).astype(np.uint8) * clean_mask,
