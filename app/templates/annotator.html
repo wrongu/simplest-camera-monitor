@@ -299,19 +299,19 @@ let activeIdx = -1;
 let dragStart = null;     // {x, y} image-pixel coords during right-click drag
 let scaleX = 1, scaleY = 1;
 
-let pollTimer = null;       // timeout id for loading-state polling
-let autoAdvTimer = null;    // timeout id for auto-advance
-let rafId = null;           // requestAnimationFrame id for progress bar animation
-let advanceDelayMs = 0;     // current user-configured delay (from slider)
-let advanceStartAt = null;  // when the current auto-advance countdown began
+let loopRunning = false;  // true while the auto-advance loop is active
+let advanceDelayMs = 0;   // current user-configured delay (from slider)
 
 // Timing: measure time from navigate() call to image ready, shown to user.
-let navigateCalledAt = null;    // performance.now() when last auto-advance navigate fired
-let lastProcMs = null;          // last measured processing time (ms)
+let navigateCalledAt = null;
+let lastProcMs = null;
 
 const COLOR_UNLABELED = '#f55';
 const COLOR_LABELED   = '#4d4';
 const COLOR_ACTIVE    = '#ff0';
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ─── Speed slider ─────────────────────────────────────────────────────────────
 const slider = document.getElementById('delay-slider');
@@ -321,13 +321,8 @@ const frameTimeEl = document.getElementById('frame-time');
 slider.addEventListener('input', () => {
   advanceDelayMs = parseInt(slider.value, 10);
   delayValEl.textContent = `${advanceDelayMs}ms`;
-  // If currently auto-advancing, restart with new delay.
-  if (autoAdvTimer !== null || rafId !== null) {
-    cancelAutoAdvance();
-    if (serverState && !serverState.needs_pause && !serverState.done) {
-      scheduleAutoAdvance();
-    }
-  }
+  if (loopRunning) { stopLoop(); runLoop(); }
+  updateProcTimeDisplay(lastProcMs);
 });
 
 function updateProcTimeDisplay(procMs) {
@@ -358,39 +353,59 @@ function adjustDelay(direction) {
   slider.dispatchEvent(new Event('input'));
 }
 
-// ─── Auto-advance (for needs_pause=false frames) ──────────────────────────────
-function cancelAutoAdvance() {
-  if (autoAdvTimer !== null) { clearTimeout(autoAdvTimer); autoAdvTimer = null; }
-  if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
-  advanceStartAt = null;
-  const bar = document.getElementById('autoadvance-bar');
-  bar.classList.remove('visible');
+// ─── Auto-advance loop ────────────────────────────────────────────────────────
+function stopLoop() {
+  loopRunning = false;
+  document.getElementById('autoadvance-bar').classList.remove('visible');
   document.getElementById('autoadvance-fill').style.width = '0%';
 }
 
-function scheduleAutoAdvance() {
-  cancelAutoAdvance();
-  advanceStartAt = performance.now();
+async function runLoop() {
+  loopRunning = true;
+  while (loopRunning) {
+    // User-configured pause before advancing — show progress bar during this window.
+    if (advanceDelayMs > 0) {
+      const bar = document.getElementById('autoadvance-bar');
+      const fill = document.getElementById('autoadvance-fill');
+      bar.classList.add('visible');
+      const start = performance.now();
+      const animFrame = () => {
+        const pct = Math.min(100, (performance.now() - start) / advanceDelayMs * 100);
+        fill.style.width = pct + '%';
+        if (pct < 100 && loopRunning) requestAnimationFrame(animFrame);
+      };
+      requestAnimationFrame(animFrame);
+      await sleep(advanceDelayMs);
+      bar.classList.remove('visible');
+      fill.style.width = '0%';
+    }
+    if (!loopRunning) break;
 
-  if (advanceDelayMs > 0) {
-    document.getElementById('autoadvance-bar').classList.add('visible');
-    animateBar();
-  }
-
-  autoAdvTimer = setTimeout(() => {
-    autoAdvTimer = null;
-    cancelAutoAdvance();
+    // Navigate to the next frame.
     navigateCalledAt = performance.now();
-    navigate('next');
-  }, advanceDelayMs);
-}
+    let state;
+    try {
+      state = await navigate('next');
+    } catch (e) {
+      console.error('navigate failed', e);
+      stopLoop();
+      break;
+    }
+    if (!loopRunning) break;
 
-function animateBar() {
-  if (advanceStartAt === null) return;
-  const elapsed = performance.now() - advanceStartAt;
-  const pct = advanceDelayMs > 0 ? Math.min(100, (elapsed / advanceDelayMs) * 100) : 100;
-  document.getElementById('autoadvance-fill').style.width = pct + '%';
-  if (pct < 100) rafId = requestAnimationFrame(animateBar);
+    // Poll until the server is done loading (short fixed interval, not slider-controlled).
+    while (state.loading && loopRunning) {
+      await sleep(50);
+      try { state = await fetchState(); } catch (e) { /* retry next tick */ }
+    }
+    if (!loopRunning) break;
+
+    // Apply UI for this frame.
+    await updateUI(state);
+
+    // Stop if no more frames or user must intervene.
+    if (state.done || state.needs_pause) { stopLoop(); break; }
+  }
 }
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
@@ -416,19 +431,21 @@ function redraw() {
 }
 
 // ─── Image loading ────────────────────────────────────────────────────────────
-function loadImage(onLoaded) {
-  img.onload = () => {
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    updateScale();
-    redraw();
-    if (navigateCalledAt !== null) {
-      updateProcTimeDisplay(performance.now() - navigateCalledAt);
-      navigateCalledAt = null;
-    }
-    if (onLoaded) onLoaded();
-  };
-  img.src = '/api/image?' + Date.now();
+function loadImage() {
+  return new Promise(resolve => {
+    img.onload = () => {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      updateScale();
+      redraw();
+      if (navigateCalledAt !== null) {
+        updateProcTimeDisplay(performance.now() - navigateCalledAt);
+        navigateCalledAt = null;
+      }
+      resolve();
+    };
+    img.src = '/api/image?' + Date.now();
+  });
 }
 
 function updateScale() {
@@ -440,7 +457,7 @@ function updateScale() {
 window.addEventListener('resize', () => { updateScale(); redraw(); });
 
 // ─── State sync ───────────────────────────────────────────────────────────────
-function applyState(state) {
+async function updateUI(state) {
   const prevKey = serverState?.key;
   serverState = state;
 
@@ -459,32 +476,31 @@ function applyState(state) {
 
   document.getElementById('done-overlay').classList.toggle('visible', state.done && !state.loading);
 
-  if (state.loading) {
-    cancelAutoAdvance();
-    schedulePoll();
-    return;
-  }
-  clearPoll();
-
-  // Reinitialise localBoxes only when the displayed frame changes.
-  if (state.key !== prevKey) {
-    const source = state.existing_annotations?.length > 0
-      ? state.existing_annotations
-      : state.blobs;
-    localBoxes = (source ?? []).map(b => ({
-      x: b.bbox[0], y: b.bbox[1], w: b.bbox[2], h: b.bbox[3],
-      label: b.label ?? null
-    }));
-    activeIdx = localBoxes.length > 0 ? 0 : -1;
-  }
-
-  loadImage(() => {
-    if (!state.done && !state.needs_pause) {
-      scheduleAutoAdvance();
-    } else {
-      cancelAutoAdvance();
+  if (!state.loading) {
+    // Reinitialise localBoxes only when the displayed frame changes.
+    if (state.key !== prevKey) {
+      const source = state.existing_annotations?.length > 0
+        ? state.existing_annotations
+        : state.blobs;
+      localBoxes = (source ?? []).map(b => ({
+        x: b.bbox[0], y: b.bbox[1], w: b.bbox[2], h: b.bbox[3],
+        label: b.label ?? null
+      }));
+      activeIdx = localBoxes.length > 0 ? 0 : -1;
     }
-  });
+    await loadImage();
+  }
+}
+
+async function applyState(state) {
+  stopLoop();
+  // Poll until loaded (handles user-triggered navigation landing on a loading frame).
+  while (state.loading) {
+    await sleep(50);
+    try { state = await fetchState(); } catch (e) { /* retry */ }
+  }
+  await updateUI(state);
+  if (!state.done && !state.needs_pause) runLoop();
 }
 
 function renderLabels(labels) {
@@ -500,46 +516,31 @@ function renderLabels(labels) {
   }
 }
 
-// ─── Polling (while server is loading) ───────────────────────────────────────
-function schedulePoll() {
-  clearPoll();
-  pollTimer = setTimeout(fetchState, 500);
-}
-function clearPoll() {
-  if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
-}
+// ─── Network ──────────────────────────────────────────────────────────────────
 async function fetchState() {
-  try {
-    applyState(await (await fetch('/api/state')).json());
-  } catch (e) {
-    schedulePoll();
-  }
+  const res = await fetch('/api/state');
+  return res.json();
+}
+
+async function navigate(action) {
+  const bboxes = localBoxes.map(b => ({ bbox: [b.x, b.y, b.w, b.h], label: b.label }));
+  const res = await fetch('/api/submit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bboxes, action })
+  });
+  return res.json();
 }
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
-async function navigate(action) {
-  const bboxes = localBoxes.map(b => ({ bbox: [b.x, b.y, b.w, b.h], label: b.label }));
-  try {
-    const res = await fetch('/api/submit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bboxes, action })
-    });
-    applyState(await res.json());
-  } catch (e) {
-    console.error('navigate failed', e);
-  }
-}
-
 function userNavigate(action) {
-  // Explicit user action: cancel auto-advance and navigate immediately.
-  cancelAutoAdvance();
-  navigate(action);
+  stopLoop();
+  navigate(action).then(applyState).catch(e => console.error('navigate failed', e));
 }
 
 function confirmQuit() {
-  cancelAutoAdvance();
-  if (window.confirm('Save and quit?')) navigate('quit');
+  stopLoop();
+  if (window.confirm('Save and quit?')) navigate('quit').then(applyState).catch(console.error);
 }
 
 // ─── Mouse: bounding box drawing / selection ──────────────────────────────────
@@ -569,7 +570,7 @@ function setBoundsFromDrag(box, x0, y0, x1, y1) {
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 canvas.addEventListener('mousedown', e => {
-  cancelAutoAdvance();
+  stopLoop();
   if (e.button !== 2) return;
   e.preventDefault();
   const { x, y } = clientToImage(e.clientX, e.clientY);
@@ -618,7 +619,7 @@ document.addEventListener('keydown', e => {
   if (document.getElementById('modal-overlay').classList.contains('visible')) return;
   if (e.target.tagName === 'INPUT') return;
 
-  cancelAutoAdvance();
+  stopLoop();
 
   const key = e.key;
 
@@ -648,19 +649,19 @@ document.addEventListener('keydown', e => {
     }
 
   } else if (key === ',') {
-    e.preventDefault(); navigate('prev');
+    e.preventDefault(); userNavigate('prev');
 
   } else if (key === '.' || key === 'Enter') {
-    e.preventDefault(); navigate('next');
+    e.preventDefault(); userNavigate('next');
 
   } else if (key === ' ') {
-    e.preventDefault(); navigate('resume');
+    e.preventDefault(); userNavigate('resume');
 
   } else if (key === 'Escape') {
     e.preventDefault(); confirmQuit();
 
   } else if (key === 's' || key === 'S') {
-    e.preventDefault(); navigate('toggle_skip');
+    e.preventDefault(); userNavigate('toggle_skip');
 
   } else if (key === '+' || key === '=') {
     e.preventDefault(); adjustDelay(-1);  // faster
@@ -709,7 +710,15 @@ document.getElementById('modal-input').addEventListener('keydown', e => {
 });
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
-fetchState();
+(async () => {
+  let state;
+  try { state = await fetchState(); } catch (e) { return; }
+  while (state.loading) {
+    await sleep(50);
+    try { state = await fetchState(); } catch (e) { return; }
+  }
+  await applyState(state);
+})();
 </script>
 </body>
 </html>

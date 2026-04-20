@@ -281,7 +281,7 @@ class TimestampAwareBackgroundSubtractor(object):
         l = cv.LUT(l, lut=lut)
         return cv.cvtColor(cv.merge((l, a, b)), cv.COLOR_LAB2BGR)
 
-    def apply(self, img: cv.Mat, t: Optional[float] = None) -> cv.Mat:
+    def apply(self, img: cv.Mat, t: Optional[float] = None) -> tuple[cv.Mat, cv.Mat]:
         if t is None:
             t = time.time()
 
@@ -309,12 +309,12 @@ class TimestampAwareBackgroundSubtractor(object):
 
         # Update the bg model with a time-adaptive learning rate and get the fg mask
         self.last_timestamp = t
-        return self.model.apply(img, learning_rate)
+        return self.model.apply(img, learning_rate), img
 
     def applyWithStats(
         self, img: cv.Mat, t: Optional[float] = None
     ) -> tuple[cv.Mat, list[ForegroundBlob]]:
-        mask = self.apply(img, t)
+        mask, img = self.apply(img, t)
 
         # Get a copy of the avg bg image
         background = self.model.getBackgroundImage()
@@ -335,7 +335,7 @@ class TimestampAwareBackgroundSubtractor(object):
         blobs = []
         for i in range(1, n_labels):
             # Drop any tiny blobs
-            if stats[i, cv.CC_STAT_AREA] < self.area_threshold:
+            if stats[i, cv.CC_STAT_AREA] < self.area_threshold * self.resize_scale ** 2:
                 continue
 
             if self.roi is not None:
