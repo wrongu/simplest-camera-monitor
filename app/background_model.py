@@ -163,9 +163,8 @@ class TimestampAwareBackgroundSubtractor(object):
         prep_blur: int = 3,
         resize_scale: float = 1.0,
         region_of_interest: Optional[cv.Mat] = None,
-        night_mode_kwargs: Optional[dict] = None,
         debug_dir: Optional[Path] = None,
-        **extras,
+        **kwargs,
     ):
         # Parameters for the OpenCV background model
         self.history_seconds = history_seconds
@@ -189,7 +188,7 @@ class TimestampAwareBackgroundSubtractor(object):
         )
 
         self.night_mode = False
-        self._night_mode_kwargs = night_mode_kwargs or {}
+        self._night_mode_kwargs = {k[6:]: v for k, v in kwargs.items() if k.startswith("night_")}
         self._day_mode_kwargs = {k: self.__dict__[k] for k in self._night_mode_kwargs.keys()}
 
         self.model = cv.createBackgroundSubtractorMOG2(

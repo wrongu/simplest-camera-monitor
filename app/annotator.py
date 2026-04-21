@@ -602,23 +602,7 @@ if __name__ == "__main__":
 
     with open(args.bg_model_config, "r") as f:
         bg_config = yaml.safe_load(f)
-
-    model = TimestampAwareBackgroundSubtractor(
-        history_seconds=bg_config["history_seconds"],
-        var_threshold=bg_config["var_threshold"],
-        detect_shadows=bg_config["detect_shadows"],
-        prep_hist_eq=bg_config["prep_hist_eq"],
-        prep_blur=bg_config["prep_blur"],
-        area_threshold=bg_config["area_threshold"],
-        shadow_correlation_threshold=bg_config["shadow_correlation_threshold"],
-        morph_radius=bg_config["morph_radius"],
-        morph_thresh=bg_config["morph_thresh"],
-        morph_iters=bg_config["morph_iters"],
-        default_fps=bg_config["default_fps"],
-        region_of_interest=cv.imread(bg_config["region_of_interest"], cv.IMREAD_GRAYSCALE),
-        resize_scale=bg_config["resize_scale"],
-        night_mode_kwargs={k[6:]: v for k, v in bg_config.items() if k.startswith("night_")},
-    )
+    model = TimestampAwareBackgroundSubtractor(**bg_config)
 
     prior_annotations: dict = {}
     if args.prior_annotations is not None:
