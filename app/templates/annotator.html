@@ -254,6 +254,8 @@
       <span>Esc</span> quit<br>
       <span>S</span> toggle skip<br>
       <span>+</span> / <span>-</span> speed<br>
+      <span>C</span> copy boxes<br>
+      <span>V</span> paste boxes<br>
       <span>RClick drag</span> draw box<br>
       <span>LClick</span> select box
     </div>
@@ -301,6 +303,8 @@ let scaleX = 1, scaleY = 1;
 
 let loopRunning = false;  // true while the auto-advance loop is active
 let advanceDelayMs = 0;   // current user-configured delay (from slider)
+
+let bboxClipboard = null; // list of box objects copied via 'c'
 
 // Timing: measure time from navigate() call to image ready, shown to user.
 let navigateCalledAt = null;
@@ -668,6 +672,18 @@ document.addEventListener('keydown', e => {
 
   } else if (key === '-') {
     e.preventDefault(); adjustDelay(+1);  // slower
+
+  } else if (key === 'c' || key === 'C') {
+    e.preventDefault();
+    bboxClipboard = localBoxes.map(b => ({ ...b }));
+
+  } else if (key === 'v' || key === 'V') {
+    e.preventDefault();
+    if (bboxClipboard !== null) {
+      localBoxes = bboxClipboard.map(b => ({ ...b }));
+      activeIdx = localBoxes.length > 0 ? 0 : -1;
+      redraw();
+    }
   }
 });
 

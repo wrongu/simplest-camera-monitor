@@ -198,6 +198,12 @@ class AnnotatorState:
         self._recent_skipped: deque = deque()
         self._populate_recent_skipped_for_warmup()
 
+        # Reverse lookup: image key → index in _all_files. Used for backward navigation past the resume point.
+        self._key_to_idx: dict = {
+            str(fn.relative_to(self.image_dir)): i
+            for i, (_, fn) in enumerate(self._all_files)
+        }
+
         # Prefetch cache: str(filename) → tuple[bytes (raw JPEG), cv.Mat (loaded img)] or _PREFETCH_PENDING.
         self._prefetch_cache: dict = {}
 
@@ -418,6 +424,22 @@ class AnnotatorState:
                 )
                 key, img_bytes, bboxes = self.history_left.pop()
                 self._load_frame(key, img_bytes, bboxes, needs_pause=True)
+            elif self.current_key is not None:
+                # history_left is exhausted — navigate further back into already-processed
+                # frames by reading directly from disk. Annotations are already in
+                # annot.images and will be surfaced via existing_annotations in get_state().
+                cur_idx = self._key_to_idx.get(self.current_key, -1)
+                if cur_idx > 0:
+                    _, filename = self._all_files[cur_idx - 1]
+                    key = str(filename.relative_to(self.image_dir))
+                    try:
+                        img_bytes = filename.read_bytes()
+                    except OSError:
+                        return
+                    self.history_right.append(
+                        (self.current_key, self.current_img_bytes, self.current_bboxes)
+                    )
+                    self._load_frame(key, img_bytes, [], needs_pause=True)
 
         elif action == "next":
             if self.history_right:
