@@ -5,3 +5,5 @@ requests
 scikit-learn
 opencv-contrib-python-headless
 flask
+ultralytics[export]
+torch
