@@ -158,10 +158,9 @@ def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonit
         cam_name = cam_config.get("name", str(i))
         media_dir = media_root / cam_name.lower().replace(" ", "_")
         roi_path = media_dir / "roi.png"
-        roi = (
-            cv.imread(str(roi_path), cv.IMREAD_GRAYSCALE) if roi_path.exists() else None
-        )
         try:
+            cam_config["default_fps"] = 1 / poll_frequency
+            cam_config["region_of_interest"]  = roi_path
             mon = CameraMonitor(
                 camera=ONVIFCameraWrapper(
                     cam_config["url"],
@@ -173,25 +172,7 @@ def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonit
                 name=cam_name,
                 brightness_threshold=cam_config["brightness_threshold"],
                 history_seconds=cam_config["history_seconds"],
-                bg_model=TimestampAwareBackgroundSubtractor(
-                    history_seconds=cam_config["history_seconds"],
-                    var_threshold=cam_config["var_threshold"],
-                    detect_shadows=cam_config["detect_shadows"],
-                    area_threshold=cam_config["area_threshold"],
-                    shadow_correlation_threshold=cam_config[
-                        "shadow_correlation_threshold"
-                    ],
-                    morph_radius=cam_config["morph_radius"],
-                    morph_thresh=cam_config["morph_thresh"],
-                    morph_iters=cam_config["morph_iters"],
-                    default_fps=1 / poll_frequency,
-                    region_of_interest=roi,
-                    night_mode_kwargs={
-                        k[6:]: v
-                        for k, v in cam_config.items()
-                        if k.startswith("night_")
-                    },
-                ),
+                bg_model=TimestampAwareBackgroundSubtractor(**cam_config),
                 save_blobs=cam_config.get("save_blobs", True),
                 model_file=cam_config.get("model_file", None),
                 output_dir=media_dir,
