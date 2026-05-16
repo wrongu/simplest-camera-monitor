@@ -1,13 +1,14 @@
-import logging
 import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 from pathlib import Path
+from typing import Optional
 
-import cv2 as cv
 import requests
 import yaml
+
+from app.detection import create_detector
 from background_model import TimestampAwareBackgroundSubtractor, BoundingBox
 from camera_monitor import (
     CameraMonitor,
@@ -16,19 +17,13 @@ from camera_monitor import (
     OnStateTransitionCallback,
 )
 from cameras import ONVIFCameraWrapper
-from typing import Callable, Optional
-from utils import LogHandler
+from utils import get_logger
 
 ONE_DAY_SECONDS = 24 * 60 * 60
 
 CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "/config/config.yaml"))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-logger = logging.getLogger("camera_monitor")
-logger.addHandler(LogHandler(batch_every=30 * 60))
+logger = get_logger("app", batching=30)
 
 
 # ---------------------------------------------------------------------------
@@ -150,17 +145,19 @@ def make_handle_detections(
 
 def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonitor]:
     trigger_classes = config.get("watch_for_class", [])
-    poll_frequency = config["poll_frequency"]
     monitor_slots: list[CameraMonitor | None] = [None] * len(config["cameras"])
     media_root = Path(config.get("media_root", "/media"))
 
     def init_camera(i, cam_config):
         cam_name = cam_config.get("name", str(i))
         media_dir = media_root / cam_name.lower().replace(" ", "_")
-        roi_path = media_dir / "roi.png"
+
+        if cam_config.get("detector_config", None) is not None:
+            detector = create_detector(cam_config["detector_config"])
+        else:
+            detector = None
+
         try:
-            cam_config["default_fps"] = 1 / poll_frequency
-            cam_config["region_of_interest"]  = roi_path
             mon = CameraMonitor(
                 camera=ONVIFCameraWrapper(
                     cam_config["url"],
@@ -170,19 +167,11 @@ def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonit
                     resolution=tuple(cam_config["resolution"]),
                 ),
                 name=cam_name,
-                brightness_threshold=cam_config["brightness_threshold"],
-                history_seconds=cam_config["history_seconds"],
-                bg_model=TimestampAwareBackgroundSubtractor(**cam_config),
-                save_blobs=cam_config.get("save_blobs", True),
-                model_file=cam_config.get("model_file", None),
+                detection_model=detector,
                 output_dir=media_dir,
                 log_lifespan=cam_config.get("log_lifespan", ONE_DAY_SECONDS / 2),
-                on_state_transition=make_handle_state_transition(
-                    client, trigger_classes
-                ),
-                on_detection=make_handle_detections(
-                    client, trigger_classes
-                ),
+                on_state_transition=make_handle_state_transition(client, trigger_classes),
+                on_detection=make_handle_detections(client, trigger_classes),
             )
             monitor_slots[i] = mon
         except Exception as e:
@@ -263,13 +252,10 @@ def main():
     threading.Thread(
         target=poll_loop, args=(monitors, poll_interval), daemon=True, name="poll"
     ).start()
-    threading.Thread(
-        target=cleanup_loop, args=(monitors,), daemon=True, name="cleanup"
-    ).start()
+    threading.Thread(target=cleanup_loop, args=(monitors,), daemon=True, name="cleanup").start()
 
     logger.info(
-        f"Camera monitor running: {len(monitors)} camera(s), "
-        f"poll_frequency={poll_interval}s"
+        f"Camera monitor running: {len(monitors)} camera(s), " f"poll_frequency={poll_interval}s"
     )
     # Block the main thread indefinitely
     threading.Event().wait()

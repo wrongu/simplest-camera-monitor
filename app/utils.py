@@ -6,6 +6,12 @@ ONE_HOUR_SECONDS = 3600
 LogLevel = int
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
+
 class LogHandler(logging.Handler):
     def __init__(self, batch_every: float = ONE_HOUR_SECONDS):
         super().__init__()
@@ -26,7 +32,15 @@ class LogHandler(logging.Handler):
             self.message_count[key] = 0
 
 
+def get_logger(name: str, level=logging.INFO, batching: int = ONE_HOUR_SECONDS) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.addHandler(LogHandler(batching))
+    return logger
+
+
 __all__ = [
-    "LogHandler", 
-    "LogLevel"
+    "LogHandler",
+    "LogLevel",
+    "get_logger",
 ]
