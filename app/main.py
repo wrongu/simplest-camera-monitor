@@ -1,15 +1,19 @@
 import os
 import threading
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
+import cv2
+import numpy as np
 import requests
 import yaml
 
 from app.detection import create_detector
-from background_model import TimestampAwareBackgroundSubtractor, BoundingBox
+from background_model import BoundingBox
 from camera_monitor import (
     CameraMonitor,
     State,
@@ -143,8 +147,9 @@ def make_handle_detections(
 # ---------------------------------------------------------------------------
 
 
-def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonitor]:
-    trigger_classes = config.get("watch_for_class", [])
+def init_monitors(
+    config: dict, on_state_transition: OnStateTransitionCallback, on_detection: OnDetectionCallback
+) -> list[CameraMonitor]:
     monitor_slots: list[CameraMonitor | None] = [None] * len(config["cameras"])
     media_root = Path(config.get("media_root", "/media"))
 
@@ -170,8 +175,8 @@ def init_monitors(config: dict, client: HomeAssistantClient) -> list[CameraMonit
                 detection_model=detector,
                 output_dir=media_dir,
                 log_lifespan=cam_config.get("log_lifespan", ONE_DAY_SECONDS / 2),
-                on_state_transition=make_handle_state_transition(client, trigger_classes),
-                on_detection=make_handle_detections(client, trigger_classes),
+                on_state_transition=on_state_transition,
+                on_detection=on_detection,
             )
             monitor_slots[i] = mon
         except Exception as e:
@@ -225,6 +230,87 @@ def cleanup_loop(monitors: list[CameraMonitor]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def run_live():
+    logger.info(f"Loading config from {CONFIG_PATH}")
+    with open(CONFIG_PATH) as f:
+        config = yaml.safe_load(f)
+
+    cv2.namedWindow("Live Monitor", cv2.WINDOW_NORMAL)
+
+    frames = defaultdict(lambda: np.zeros((480, 640, 3), dtype=np.uint8))
+
+    def redraw():
+        try:
+            combo = np.concatenate(list(frames.values()), axis=1)
+            cv2.imshow("Live Monitor", combo)
+        except ValueError as e:
+            print(e)
+
+    def handle_frame(mon: CameraMonitor, path, frame: np.ndarray):
+        frames[mon.name] = frame
+
+    def handle_state(mon: CameraMonitor, st: State):
+        cv2.putText(
+            frames[mon.name],
+            f"STATE: {st}",
+            (10, 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 255),
+            2,
+        )
+
+    def handle_detect(mon: CameraMonitor, boxes: list[BoundingBox]):
+        for box in boxes:
+            cv2.rectangle(
+                frames[mon.name],
+                (box.x, box.y),
+                (box.x + box.width, box.y + box.height),
+                color=(0, 255, 0),
+                thickness=2,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.putText(
+                frames[mon.name],
+                f"[{box.class_id}]",
+                (box.x + box.width // 2, box.y + box.height // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 255, 0),
+                2,
+            )
+
+    monitors = init_monitors(config, handle_state, handle_detect)
+    if not monitors:
+        logger.error("No cameras initialized. Exiting.")
+        return
+
+    # Initial file cleanup
+    for monitor in monitors:
+        monitor.cleanup_files()
+
+    # Inject drawing instead of saving
+    # TODO better callback logic built-in to monitor
+    for mon in monitors:
+        mon._save_image = partial(handle_frame, mon)
+
+    def poll():
+        for mon in monitors:
+            mon.poll()
+        redraw()
+
+    poll()
+    last_poll = time.time()
+    while True:
+        if time.time() - last_poll > config["poll_frequency"]:
+            poll()
+            last_poll = time.time()
+
+        k = cv2.waitKey(1)
+        if k == ord("q"):
+            break
+
+
 def main():
     logger.info(f"Loading config from {CONFIG_PATH}")
     with open(CONFIG_PATH) as f:
@@ -239,7 +325,10 @@ def main():
         ]
     )
 
-    monitors = init_monitors(config, client)
+    handle_state = make_handle_state_transition(client, config.get("watch_for_class", []))
+    handle_detections = make_handle_detections(client, config.get("watch_for_class", []))
+
+    monitors = init_monitors(config, handle_state, handle_detections)
     if not monitors:
         logger.error("No cameras initialized. Exiting.")
         return
@@ -262,4 +351,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--live-debug", action="store_true")
+    args = parser.parse_args()
+
+    if args.live_debug:
+        run_live()
+    else:
+        main()
