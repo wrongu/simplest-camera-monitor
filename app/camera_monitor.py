@@ -178,13 +178,6 @@ class CameraMonitor(object):
                 n_images_deleted += 1
         logger.info(f"Deleted {n_images_deleted} old images")
 
-        n_blobs_deleted = 0
-        for t, f in get_all_timestamped_files_sorted(self.output_dir, glob="blobs/**/*.jpg"):
-            if now - t > self.log_lifespan:
-                f.unlink()
-                n_blobs_deleted += 1
-        logger.info(f"Deleted {n_blobs_deleted} old blobs files")
-
         # Remove any remaining empty directories
         for path, subdirs, files in self.output_dir.walk(top_down=False):
             if not files and not subdirs and path != self.output_dir:

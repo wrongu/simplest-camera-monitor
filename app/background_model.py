@@ -32,6 +32,30 @@ class BoundingBox:
     def from_dict(cls, d: dict) -> "BoundingBox":
         return cls(*d["bbox"], class_id=d["label"])
 
+    @classmethod
+    def from_yolo(
+        cls,
+        im_w: int,
+        im_h: int,
+        cx: float,
+        cy: float,
+        w: float,
+        h: float,
+        class_id: Optional[str] = None,
+    ) -> "BoundingBox":
+        w = w * im_w
+        h = h * im_h
+        cx = cx * im_w
+        cy = cy * im_h
+
+        return cls(
+            x=int(round(cx - w / 2)),
+            y=int(round(cy - h / 2)),
+            width=int(round(w)),
+            height=int(round(h)),
+            class_id=class_id,
+        )
+
     @property
     def area(self) -> int:
         return self.width * self.height
@@ -334,7 +358,7 @@ class TimestampAwareBackgroundSubtractor(object):
         blobs = []
         for i in range(1, n_labels):
             # Drop any tiny blobs
-            if stats[i, cv.CC_STAT_AREA] < self.area_threshold * self.resize_scale ** 2:
+            if stats[i, cv.CC_STAT_AREA] < self.area_threshold * self.resize_scale**2:
                 continue
 
             if self.roi is not None:

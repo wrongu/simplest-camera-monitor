@@ -6,6 +6,7 @@ from typing import Protocol, Optional, assert_never
 import cv2 as cv
 import numpy as np
 import yaml
+from ultralytics import YOLO
 
 from app.background_model import BoundingBox, TimestampAwareBackgroundSubtractor
 from app.classifier import featurize
@@ -69,6 +70,47 @@ class BackgroundModelWithMorphologyClassifier(DetectionModel):
         return [blob.bbox for blob in blobs]
 
 
+class YoloDetectionModel(DetectionModel):
+    def __init__(
+        self,
+        weights: Path,
+        roi: Optional[str | Path] = None,
+        brightness_threshold: float = 0.0,
+    ):
+        self.yolo = YOLO(weights, task="detect")
+        self.roi_img = cv.imread(str(roi), cv.IMREAD_GRAYSCALE) if roi is not None else None
+        self.brightness_threshold = brightness_threshold
+
+    def is_in_roi(self, norm_x: float, norm_y: float):
+        if self.roi_img is not None:
+            h, w = self.roi_img.shape
+            x, y = int(w * norm_x), int(h * norm_y)
+            return self.roi_img[y, x] > 127
+        return True
+
+    def initialize_from_logs(self, log_dir: Path, now: Optional[float] = None):
+        pass
+
+    def process_frame(self, frame: cv.Mat, timestamp: float) -> list[BoundingBox]:
+        # check if too dark
+        if np.median(frame.ravel()) < self.brightness_threshold:
+            return []
+
+        frame_rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+        detections = self.yolo.predict(frame_rgb)
+        detections_out = []
+
+        for det in detections:
+            for prob, box in zip(det.probs, det.boxes):
+                cx, cy, bw, bh = box
+                if self.is_in_roi(cx, cy) and prob > 0.3:
+                    h, w, _ = np.atleast_3d(frame).shape
+                    detections_out.append(
+                        BoundingBox.from_yolo(w, h, cx, cy, bw, bh, class_id="???")
+                    )
+        return detections_out
+
+
 def create_detector(config_file: str | Path) -> DetectionModel:
     with open(config_file, "rb") as f:
         config = yaml.safe_load(f)
@@ -80,5 +122,7 @@ def create_detector(config_file: str | Path) -> DetectionModel:
                 model_file=config["model_file"],
                 brightness_threshold=config.get("brightness_threshold", 10.0),
             )
+        case "YoloDetectionModel":
+            return YoloDetectionModel(**config)
         case _:
             assert_never(config["class"])
