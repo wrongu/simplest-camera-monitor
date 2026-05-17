@@ -3,3 +3,5 @@ black
 matplotlib
 pandas
 tqdm
+ultralytics[export]
+torch

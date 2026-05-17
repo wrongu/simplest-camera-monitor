@@ -47,9 +47,6 @@ def main():
         dets = detector.process_frame(the_image, ts)
         elapsed = time.time() - start
 
-        if dets:
-            print(fil, len(dets), "detections")
-
         times.append(elapsed)
 
     avg_time = np.mean(times)
