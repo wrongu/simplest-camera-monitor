@@ -5,7 +5,16 @@ from typing import Optional, Self
 
 import cv2 as cv
 import numpy as np
-from ultralytics.engine.results import Boxes
+
+
+@dataclass
+class YoloBoundingBox:
+    cx: float
+    cy: float
+    w: float
+    h: float
+    confidence: float
+    class_id: int
 
 
 @dataclass
@@ -14,40 +23,42 @@ class BoundingBox:
     y: int  # top
     width: int
     height: int
+    confidence: Optional[float] = None
     class_id: Optional[str] = None
 
-    def unscale(self, img_scale: float) -> Self:
-        self.x = int(round(self.x / img_scale))
-        self.y = int(round(self.y / img_scale))
-        self.width = int(round(self.width / img_scale))
-        self.height = int(round(self.height / img_scale))
+    def unscale(self, img_scale: float | tuple[float, float]) -> Self:
+        if isinstance(img_scale, tuple):
+            scale_x, scale_y = img_scale
+        else:
+            scale_x, scale_y = img_scale, img_scale
+
+        self.x = int(round(self.x / scale_x))
+        self.y = int(round(self.y / scale_y))
+        self.width = int(round(self.width / scale_x))
+        self.height = int(round(self.height / scale_y))
         return self
 
     def to_dict(self) -> dict:
         return {
             "bbox": [int(self.x), int(self.y), int(self.width), int(self.height)],
+            "conf": self.confidence,
             "label": self.class_id,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "BoundingBox":
-        return cls(*d["bbox"], class_id=d["label"])
+        return cls(*d["bbox"], confidence=d["conf"], class_id=d["label"])
 
     @classmethod
-    def from_yolo(cls, yolo_boxes: Boxes, class_lookup: dict[int, str]) -> list["BoundingBox"]:
-        out = []
-        for i in range(len(yolo_boxes)):
-            cx, cy, w, h = yolo_boxes.xywh[i].round().int()
-            out.append(
-                cls(
-                    x=cx.item() - w.item() // 2,
-                    y=cy.item() - h.item() // 2,
-                    width=w.item(),
-                    height=h.item(),
-                    class_id=class_lookup[int(yolo_boxes.cls[i].item())],
-                )
-            )
-        return out
+    def from_yolo(cls, yolo_box: YoloBoundingBox, class_lookup: dict[int, str]) -> "BoundingBox":
+        return cls(
+            x=int(round(yolo_box.cx - yolo_box.w / 2)),
+            y=int(round(yolo_box.cy - yolo_box.h / 2)),
+            width=int(round(yolo_box.w)),
+            height=int(round(yolo_box.h)),
+            confidence=yolo_box.confidence,
+            class_id=class_lookup[int(yolo_box.class_id)],
+        )
 
     @property
     def area(self) -> int:
@@ -111,14 +122,10 @@ class BoundingBox:
 
     def draw(self, img: cv.Mat, color: tuple[int, int, int]) -> cv.Mat:
         cv.rectangle(img, (self.x, self.y), (self.x + self.width, self.y + self.height), color, 2)
-        cv.putText(
-            img,
-            f"{self.class_id}",
-            (self.x + 10, self.y + 10),
-            cv.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            color,
-        )
+        txt = str(self.class_id)
+        if self.confidence is not None:
+            txt += f" [{self.confidence:.2f}]"
+        cv.putText(img, txt, (self.x + 10, self.y + 10), cv.FONT_HERSHEY_SIMPLEX, 0.5, color)
         return img
 
 

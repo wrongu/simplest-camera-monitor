@@ -19,7 +19,7 @@ try:
 except ImportError:
     OnnxSession = None
 
-from app.background_model import BoundingBox, TimestampAwareBackgroundSubtractor
+from app.background_model import BoundingBox, YoloBoundingBox, TimestampAwareBackgroundSubtractor
 from app.classifier import featurize
 from app.image_loader import get_all_timestamped_files_sorted
 from app.utils import get_logger
@@ -87,10 +87,12 @@ class YoloDetectionModel(DetectionModel):
         weights: Path,
         roi: Optional[str | Path] = None,
         brightness_threshold: float = 0.0,
+        confidence_threshold: float = 0.5,
     ):
         self.yolo = YOLO(weights, task="detect")
         self.roi_img = cv.imread(str(roi), cv.IMREAD_GRAYSCALE) if roi is not None else None
         self.brightness_threshold = brightness_threshold
+        self.confidence_threshold = confidence_threshold
 
     def is_in_roi(self, norm_x: float, norm_y: float):
         if self.roi_img is not None:
@@ -112,22 +114,21 @@ class YoloDetectionModel(DetectionModel):
         detections_out = []
 
         for det in detections:
-            boxes = BoundingBox.from_yolo(det.boxes, det.names)
-            for box in boxes:
-                if self.is_in_roi(box.cx, box.cy):
+            for yolo_box in det.boxes:
+                box = BoundingBox.from_yolo(
+                    YoloBoundingBox(
+                        *yolo_box.xywh.flatten().numpy(),
+                        yolo_box.conf.item(),
+                        yolo_box.cls.numpy().astype(int).item(),
+                    ),
+                    self.yolo.names,
+                )
+                if self.is_in_roi(box.cx, box.cy) and box.confidence > self.confidence_threshold:
                     detections_out.append(box)
         return detections_out
 
 
 class OnnxYoloDetectionModel(DetectionModel):
-    class OnnxYoloBoundingBox(NamedTuple):
-        x1: float
-        y1: float
-        x2: float
-        y2: float
-        confidence: float
-        class_id: int
-
     def __init__(
         self,
         weights: Path,
@@ -170,23 +171,16 @@ class OnnxYoloDetectionModel(DetectionModel):
         aspect_h = self.img_size[1] / frame.shape[0]
 
         raw_output = self.model.run(None, {"images": self.prep_image(frame)})[0][0]
-        bboxes = [OnnxYoloDetectionModel.OnnxYoloBoundingBox(*row) for row in raw_output]
-        detections_out = []
-        for box in bboxes:
-            if box.confidence < self.confidence_threshold:
-                continue
-            if not self.is_in_roi((box.x1 + box.x2) // 2, (box.y1 + box.y2) // 2):
-                continue
-            detections_out.append(
-                BoundingBox(
-                    x=int(round(box.x1 / aspect_w)),
-                    y=int(round(box.y1 / aspect_h)),
-                    width=int(round((box.x2 - box.x1) / aspect_w)),
-                    height=int(round((box.y2 - box.y1) / aspect_h)),
-                    class_id=self.class_lookup[box.class_id],
-                )
-            )
-        return detections_out
+        onnx_bboxes = [YoloBoundingBox(*row) for row in raw_output]
+        bboxes = [
+            BoundingBox.from_yolo(box, self.class_lookup).unscale((aspect_w, aspect_h))
+            for box in onnx_bboxes
+        ]
+        return [
+            box
+            for box in bboxes
+            if self.is_in_roi(box.cx, box.cy) and box.confidence > self.confidence_threshold
+        ]
 
 
 def create_detector(config_file: str | Path) -> DetectionModel:
