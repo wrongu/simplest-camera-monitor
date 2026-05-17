@@ -8,6 +8,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN apt-get remove libglib2.0-0
 
 COPY app /app
-WORKDIR /app
+WORKDIR /
 
-CMD ["python", "main.py"]
+CMD ["python", "-m", "app.main"]
