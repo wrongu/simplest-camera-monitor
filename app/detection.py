@@ -94,11 +94,9 @@ class YoloDetectionModel(DetectionModel):
         self.brightness_threshold = brightness_threshold
         self.confidence_threshold = confidence_threshold
 
-    def is_in_roi(self, norm_x: float, norm_y: float):
+    def is_in_roi(self, x: float, y: float):
         if self.roi_img is not None:
-            h, w = self.roi_img.shape
-            x, y = int(w * norm_x), int(h * norm_y)
-            return self.roi_img[y, x] > 127
+            return self.roi_img[int(round(y)), int(round(x))] > 127
         return True
 
     def initialize_from_logs(self, log_dir: Path, now: Optional[float] = None):
@@ -144,11 +142,9 @@ class OnnxYoloDetectionModel(DetectionModel):
         self.brightness_threshold = brightness_threshold
         self.confidence_threshold = confidence_threshold
 
-    def is_in_roi(self, norm_x: float, norm_y: float):
+    def is_in_roi(self, x: float, y: float):
         if self.roi_img is not None:
-            h, w = self.roi_img.shape
-            x, y = int(w * norm_x), int(h * norm_y)
-            return self.roi_img[y, x] > 127
+            return self.roi_img[int(round(y)), int(round(x))] > 127
         return True
 
     def prep_image(self, image: np.ndarray) -> np.ndarray:

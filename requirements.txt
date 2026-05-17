@@ -7,3 +7,4 @@ opencv-contrib-python-headless
 flask
 onnx
 onnxruntime
+onnxslim
