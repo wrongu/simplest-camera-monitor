@@ -34,17 +34,17 @@ class BoundingBox:
         return cls(*d["bbox"], class_id=d["label"])
 
     @classmethod
-    def from_yolo(cls, yolo_boxes: Boxes) -> list["BoundingBox"]:
+    def from_yolo(cls, yolo_boxes: Boxes, class_lookup: dict[int, str]) -> list["BoundingBox"]:
         out = []
         for i in range(len(yolo_boxes)):
             cx, cy, w, h = yolo_boxes.xywh[i].round().int()
             out.append(
                 cls(
-                    x=cx.item() - w.item() / 2,
-                    y=cy.item() - h.item() / 2,
+                    x=cx.item() - w.item() // 2,
+                    y=cy.item() - h.item() // 2,
                     width=w.item(),
                     height=h.item(),
-                    class_id=str(int(yolo_boxes.cls[i].item())),
+                    class_id=class_lookup[int(yolo_boxes.cls[i].item())],
                 )
             )
         return out

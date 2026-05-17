@@ -101,7 +101,7 @@ class YoloDetectionModel(DetectionModel):
         detections_out = []
 
         for det in detections:
-            boxes = BoundingBox.from_yolo(det.boxes)
+            boxes = BoundingBox.from_yolo(det.boxes, det.names)
             for box in boxes:
                 if self.is_in_roi(box.cx, box.cy):
                     detections_out.append(box)
