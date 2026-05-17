@@ -29,6 +29,7 @@ class State(Enum):
     REBOOT = 3
 
 
+OnGetImageCallback = Callable[["CameraMonitor", cv.Mat, float], None]
 OnStateTransitionCallback = Callable[["CameraMonitor", State], None]
 OnDetectionCallback = Callable[["CameraMonitor", list[BoundingBox]], None]
 
@@ -41,6 +42,7 @@ class CameraMonitor(object):
         detection_model: Optional[DetectionModel] = None,
         output_dir: Optional[Path | str] = None,
         log_lifespan: int = ONE_DAY_SECONDS,
+        on_get_image: Optional[OnGetImageCallback] = None,
         on_state_transition: Optional[OnStateTransitionCallback] = None,
         on_detection: Optional[OnDetectionCallback] = None,
     ):
@@ -58,6 +60,7 @@ class CameraMonitor(object):
         self.log_lifespan = log_lifespan
         self.cleanup_files()
 
+        self.on_get_image = on_get_image
         self.on_state_transition = on_state_transition
         self.on_detection = on_detection
 
@@ -151,6 +154,9 @@ class CameraMonitor(object):
     def log_frame(self, frame: cv.Mat, timestamp: float) -> None:
         if timestamp <= self.last_timestamp:
             return
+
+        if self.on_get_image is not None:
+            self.on_get_image(self, frame, timestamp)
 
         self.last_timestamp = timestamp
 

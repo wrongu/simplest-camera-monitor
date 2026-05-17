@@ -19,6 +19,7 @@ from camera_monitor import (
     State,
     OnDetectionCallback,
     OnStateTransitionCallback,
+    OnGetImageCallback,
 )
 from cameras import ONVIFCameraWrapper
 from utils import get_logger
@@ -148,7 +149,11 @@ def make_handle_detections(
 
 
 def init_monitors(
-    config: dict, on_state_transition: OnStateTransitionCallback, on_detection: OnDetectionCallback
+    config: dict,
+    *,
+    on_get_image: Optional[OnGetImageCallback] = None,
+    on_state_transition: Optional[OnStateTransitionCallback] = None,
+    on_detection: Optional[OnDetectionCallback] = None,
 ) -> list[CameraMonitor]:
     monitor_slots: list[CameraMonitor | None] = [None] * len(config["cameras"])
     media_root = Path(config.get("media_root", "/media"))
@@ -175,6 +180,7 @@ def init_monitors(
                 detection_model=detector,
                 output_dir=media_dir,
                 log_lifespan=cam_config.get("log_lifespan", ONE_DAY_SECONDS / 2),
+                on_get_image=on_get_image,
                 on_state_transition=on_state_transition,
                 on_detection=on_detection,
             )
@@ -246,7 +252,7 @@ def run_live():
         except ValueError as e:
             print(e)
 
-    def handle_frame(mon: CameraMonitor, path, frame: np.ndarray):
+    def handle_frame(mon: CameraMonitor, frame: np.ndarray, timestamp: float):
         frames[mon.name] = frame
 
     def handle_state(mon: CameraMonitor, st: State):
@@ -280,7 +286,12 @@ def run_live():
                 2,
             )
 
-    monitors = init_monitors(config, handle_state, handle_detect)
+    monitors = init_monitors(
+        config,
+        on_get_image=handle_frame,
+        on_state_transition=handle_state,
+        on_detection=handle_detect,
+    )
     if not monitors:
         logger.error("No cameras initialized. Exiting.")
         return
@@ -288,11 +299,6 @@ def run_live():
     # Initial file cleanup
     for monitor in monitors:
         monitor.cleanup_files()
-
-    # Inject drawing instead of saving
-    # TODO better callback logic built-in to monitor
-    for mon in monitors:
-        mon._save_image = partial(handle_frame, mon)
 
     def poll():
         for mon in monitors:
@@ -328,7 +334,11 @@ def main():
     handle_state = make_handle_state_transition(client, config.get("watch_for_class", []))
     handle_detections = make_handle_detections(client, config.get("watch_for_class", []))
 
-    monitors = init_monitors(config, handle_state, handle_detections)
+    monitors = init_monitors(
+        config,
+        on_state_transition=handle_state,
+        on_detection=handle_detections,
+    )
     if not monitors:
         logger.error("No cameras initialized. Exiting.")
         return
