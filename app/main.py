@@ -3,9 +3,14 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
-from functools import partial
 from pathlib import Path
 from typing import Optional
+import sys
+
+try:
+    import app
+except ImportError:
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import cv2
 import numpy as np
