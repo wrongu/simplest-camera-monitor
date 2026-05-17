@@ -5,6 +5,7 @@ from typing import Optional, Self
 
 import cv2 as cv
 import numpy as np
+from ultralytics.engine.results import Boxes
 
 
 @dataclass
@@ -33,32 +34,32 @@ class BoundingBox:
         return cls(*d["bbox"], class_id=d["label"])
 
     @classmethod
-    def from_yolo(
-        cls,
-        im_w: int,
-        im_h: int,
-        cx: float,
-        cy: float,
-        w: float,
-        h: float,
-        class_id: Optional[str] = None,
-    ) -> "BoundingBox":
-        w = w * im_w
-        h = h * im_h
-        cx = cx * im_w
-        cy = cy * im_h
-
-        return cls(
-            x=int(round(cx - w / 2)),
-            y=int(round(cy - h / 2)),
-            width=int(round(w)),
-            height=int(round(h)),
-            class_id=class_id,
-        )
+    def from_yolo(cls, yolo_boxes: Boxes) -> list["BoundingBox"]:
+        out = []
+        for i in range(len(yolo_boxes)):
+            cx, cy, w, h = yolo_boxes.xywh[i].round().int()
+            out.append(
+                cls(
+                    x=cx.item() - w.item() / 2,
+                    y=cy.item() - h.item() / 2,
+                    width=w.item(),
+                    height=h.item(),
+                    class_id=str(int(yolo_boxes.cls[i].item())),
+                )
+            )
+        return out
 
     @property
     def area(self) -> int:
         return self.width * self.height
+
+    @property
+    def cx(self) -> float:
+        return self.x + self.width // 2
+
+    @property
+    def cy(self) -> float:
+        return self.y + self.height // 2
 
     def set_bounds(self, x0, y0, x1, y1):
         left, top = min(x0, x1), min(y0, y1)

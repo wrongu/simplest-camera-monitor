@@ -1,19 +1,18 @@
 import json
 import pickle
 from pathlib import Path
-from typing import Optional, override
+from typing import Optional
 
 import cv2 as cv
 import numpy as np
 from sklearn.feature_selection import SelectKBest
-from sklearn.feature_selection._univariate_selection import _BaseFilter
 from sklearn.metrics import ConfusionMatrixDisplay, classification_report
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier
 
-from background_model import ForegroundBlob, _is_night_mode_image
+from app.background_model import ForegroundBlob, _is_night_mode_image
 
 FEATURE_NAMES = [
     "day_night",
@@ -85,9 +84,7 @@ def _sanity_check_labels(annotations: dict):
     unique_labels = {int(label) for label in unique_labels}
     k = len(annotations["labels"])
     if unique_labels != set(range(k)):
-        raise ValueError(
-            f"Labels must be integers in the range [0, {k-1}]. Found: {unique_labels}"
-        )
+        raise ValueError(f"Labels must be integers in the range [0, {k-1}]. Found: {unique_labels}")
 
 
 def load_annotations_as_data(
@@ -103,15 +100,11 @@ def load_annotations_as_data(
     _sanity_check_labels(annotations)
 
     if binary_detection is not None:
-        label_handler = lambda lbl: (
-            1 if annotations["labels"][lbl] == binary_detection else 0
-        )
+        label_handler = lambda lbl: (1 if annotations["labels"][lbl] == binary_detection else 0)
         label_lookup = {0: f"not {binary_detection}", 1: binary_detection}
     else:
         label_handler = int
-        label_lookup = {
-            int(lbl): annotations["labels"][lbl] for lbl in annotations["labels"]
-        }
+        label_lookup = {int(lbl): annotations["labels"][lbl] for lbl in annotations["labels"]}
 
     features, labels, files, bboxes = [], [], [], []
     n_loaded, n_skipped = 0, 0
@@ -149,8 +142,7 @@ def get_sample_weights(classes, rebalance):
         weight = rebalance_weight
     elif isinstance(rebalance, float) and rebalance > 0:
         weight = np.exp(
-            (1 - rebalance) * np.log(equal_weight)
-            + rebalance * np.log(rebalance_weight)
+            (1 - rebalance) * np.log(equal_weight) + rebalance * np.log(rebalance_weight)
         )
     else:
         weight = equal_weight
@@ -202,15 +194,13 @@ def main(
         annot_file, binary_detection
     )
 
-    X_train, X_test, y_train, y_test, files_train, files_test, bb_train, bb_test = (
-        train_test_split(
-            features,
-            labels,
-            files,
-            bboxes,
-            test_size=test_fraction,
-            random_state=seed,
-        )
+    X_train, X_test, y_train, y_test, files_train, files_test, bb_train, bb_test = train_test_split(
+        features,
+        labels,
+        files,
+        bboxes,
+        test_size=test_fraction,
+        random_state=seed,
     )
 
     # Cross-validation hyperparameter search

@@ -101,13 +101,10 @@ class YoloDetectionModel(DetectionModel):
         detections_out = []
 
         for det in detections:
-            for prob, box in zip(det.probs, det.boxes):
-                cx, cy, bw, bh = box
-                if self.is_in_roi(cx, cy) and prob > 0.3:
-                    h, w, _ = np.atleast_3d(frame).shape
-                    detections_out.append(
-                        BoundingBox.from_yolo(w, h, cx, cy, bw, bh, class_id="???")
-                    )
+            boxes = BoundingBox.from_yolo(det.boxes)
+            for box in boxes:
+                if self.is_in_roi(box.cx, box.cy):
+                    detections_out.append(box)
         return detections_out
 
 
@@ -115,7 +112,7 @@ def create_detector(config_file: str | Path) -> DetectionModel:
     with open(config_file, "rb") as f:
         config = yaml.safe_load(f)
 
-    match config["class"]:
+    match config.pop("class"):
         case "BackgroundModelWithMorphologyClassifier":
             return BackgroundModelWithMorphologyClassifier(
                 bg_model=TimestampAwareBackgroundSubtractor(**config),
