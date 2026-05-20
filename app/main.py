@@ -1,11 +1,11 @@
 import os
+import sys
 import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 from pathlib import Path
 from typing import Optional
-import sys
 
 try:
     import app
@@ -248,7 +248,7 @@ def run_live():
 
     cv2.namedWindow("Live Monitor", cv2.WINDOW_NORMAL)
 
-    frames = defaultdict(lambda: np.zeros((480, 640, 3), dtype=np.uint8))
+    frames = defaultdict(lambda: np.zeros((360, 640, 3), dtype=np.uint8))
 
     def redraw():
         try:
@@ -264,7 +264,7 @@ def run_live():
         cv2.putText(
             frames[mon.name],
             f"STATE: {st}",
-            (10, 10),
+            (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             1,
             (0, 0, 255),

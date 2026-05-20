@@ -9,11 +9,14 @@ import requests
 from onvif import ONVIFCamera
 
 from app.image_loader import get_all_timestamped_files_sorted
+from app.utils import get_logger
+
+logger = get_logger("cameras")
 
 
 class Camera(Protocol):
-    def get_frame(self) -> tuple[float, cv.Mat]: ...
-    def get_last_frame(self) -> tuple[float, cv.Mat]: ...
+    def get_frame(self) -> tuple[float, cv.Mat | None]: ...
+    def get_last_frame(self) -> tuple[float, cv.Mat | None]: ...
     def reboot(self) -> bool: ...
 
 
@@ -44,10 +47,12 @@ class VideoStreamBackgroundThread(threading.Thread):
             else:
                 with self._frame_lock:
                     self.frame = None
+                logger.error(f"Dropped frame; delay = {backoff}s")
                 self._consecutive_failures += 1
                 time.sleep(min(backoff, _BACKOFF_MAX))
                 backoff = min(backoff * 2, _BACKOFF_MAX)
                 if self._consecutive_failures % _RECONNECT_AFTER_FAILURES == 0:
+                    logger.error("Too many stream failures; attempting reconnect")
                     self.cap.release()
                     self.cap = cv.VideoCapture(self.url)
 
@@ -58,6 +63,23 @@ class VideoStreamBackgroundThread(threading.Thread):
         self.running = False
         self.join(timeout=2)
         self.cap.release()
+
+
+# def dictify(obj: object):
+#     if isinstance(obj, Mapping):
+#         return {k_: dictify(v_) for k_, v_ in obj.items()}
+#     elif isinstance(obj, list) or isinstance(obj, tuple):
+#         return [dictify(v_) for v_ in obj]
+#     elif hasattr(obj, "__dict__"):
+#         d = obj.__dict__
+#         for k, v in d.items():
+#             if k == "__values__":
+#                 return dictify(v)
+#             else:
+#                 d[k] = dictify(v)
+#         return d
+#     else:
+#         return obj
 
 
 _NO_FRAME_TIMEOUT = 10.0
@@ -80,6 +102,7 @@ class ONVIFCameraWrapper(Camera):
         self._resolution = resolution
         self.stream = None
         self.last_frame = None
+        self.last_frame_raw = None
         self.last_frame_time = time.time()  # seed so timeout starts from init
         self._init_failed = False
 
@@ -89,17 +112,31 @@ class ONVIFCameraWrapper(Camera):
             profiles = self.media.GetProfiles()
             if not profiles:
                 raise ValueError("No media profiles found on camera")
-            available_resolutions = []
+
+            # pprint([dictify(p) for p in profiles])
+
+            nearest_resolution_diff = 1e6
             for profile in profiles:
+                # TODO - there is sometimes a 'snapshot' interface where Encoding is "jpeg". Use that when appropriate,
+                #  but also beware of much lower frame rate limits. Using the jpeg interface means no background
+                #  thread for streaming, which is nice if only taking infrequent snapshots.
+                if profile.VideoEncoderConfiguration.Encoding != "H264":
+                    continue
                 res = profile.VideoEncoderConfiguration.Resolution
-                available_resolutions.append((res.Width, res.Height))
-            try:
-                i_profile = available_resolutions.index(resolution)
-                self.profile = profiles[i_profile]
-            except ValueError:
-                raise ValueError(
-                    f"Requested resolution {resolution} not available. Available: {available_resolutions}"
+                res_diff = abs(resolution[0] - res.Width) + abs(resolution[1] - res.Height)
+                if res_diff < nearest_resolution_diff:
+                    nearest_resolution_diff = res_diff
+                    self.profile = profile
+
+            if resolution != (
+                self.profile.VideoEncoderConfiguration.Resolution.Width,
+                self.profile.VideoEncoderConfiguration.Resolution.Height,
+            ):
+                logger.warning(
+                    f"Requested resolution {resolution} "
+                    f"but using {self.profile.VideoEncoderConfiguration.Resolution}"
                 )
+
             stream = self.media.GetStreamUri(
                 {
                     "StreamSetup": {
@@ -110,9 +147,7 @@ class ONVIFCameraWrapper(Camera):
                 }
             )
             rtsp_url = stream.Uri
-            self.rtsp_url = rtsp_url.replace(
-                "rtsp://", f"rtsp://{username}:{password}@"
-            )
+            self.rtsp_url = rtsp_url.replace("rtsp://", f"rtsp://{username}:{password}@")
             self.init_capture()
         except Exception as e:
             self._init_failed = True
@@ -129,13 +164,19 @@ class ONVIFCameraWrapper(Camera):
         if self._init_failed:
             raise ConnectionError(f"Camera init failed: {self._init_error}")
         with self.stream._frame_lock:
+            now = time.time()
             frame = self.stream.frame
-        if frame is not None and not np.all(frame == self.last_frame):
+        if frame is not None and not np.array_equal(frame, self.last_frame_raw):
+            frame = frame.copy()
+            self.last_frame_raw = frame
+            h, w = frame.shape[:2]
+            if (w, h) != self._resolution:
+                frame = cv.resize(frame, self._resolution, interpolation=cv.INTER_AREA)
             self.last_frame = frame
-            self.last_frame_time = time.time()
-        elif frame is None and time.time() - self.last_frame_time > _NO_FRAME_TIMEOUT:
+            self.last_frame_time = now
+        elif frame is None and now - self.last_frame_time > _NO_FRAME_TIMEOUT:
             raise ConnectionError(f"No frames received for >{_NO_FRAME_TIMEOUT}s")
-        return self.last_frame_time, frame
+        return self.last_frame_time, self.last_frame
 
     def get_last_frame(self) -> tuple[float, cv.Mat | None]:
         if self.last_frame is not None and (time.time() - self.last_frame_time) < 5:
@@ -192,7 +233,7 @@ class ESPHomeCameraWrapper(Camera):
                 resp = requests.post(self.url + "/switch/reboot/turn_on", timeout=5)
                 return resp.status_code == 200
             except Exception as e:
-                print(f"Failed to send reboot request: {e}")
+                logger.error(f"Failed to send reboot request: {e}")
                 return False
         else:
             return False

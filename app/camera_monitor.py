@@ -5,14 +5,14 @@ from typing import Optional, Callable
 
 import cv2 as cv
 
-from app.detection import DetectionModel
-from app.utils import get_logger, BoundingBox
 from app.cameras import Camera
+from app.detection import DetectionModel
 from app.image_loader import (
     create_timestamped_filename,
     get_all_timestamped_files_sorted,
     ensure_files_timestamp_named,
 )
+from app.utils import get_logger, BoundingBox
 
 logger = get_logger("camera_monitor", batching=300)
 
