@@ -73,7 +73,7 @@ class TimestampAwareBackgroundSubtractor(object):
         default_fps: float = 0.1,
         prep_hist_eq: float = 0.5,
         prep_blur: int = 3,
-        resize_scale: float = 1.0,
+        target_size: tuple[int, int] = (640, 360),
         region_of_interest: Optional[cv.Mat] = None,
         debug_dir: Optional[Path] = None,
         **kwargs,
@@ -88,7 +88,7 @@ class TimestampAwareBackgroundSubtractor(object):
         self.update_fps(delta_t=1.0 / default_fps)
         self.prep_hist_eq = prep_hist_eq
         self.prep_blur = prep_blur
-        self.resize_scale = resize_scale
+        self.target_size = tuple(target_size)
 
         # Parameters for post-processing cleanup
         self.area_threshold = area_threshold
@@ -114,13 +114,7 @@ class TimestampAwareBackgroundSubtractor(object):
 
         self.roi = region_of_interest
         if self.roi is not None:
-            self.roi = cv.resize(
-                self.roi,
-                dsize=None,
-                fx=self.resize_scale,
-                fy=self.resize_scale,
-                interpolation=cv.INTER_AREA,
-            )
+            self.roi = cv.resize(self.roi, dsize=target_size, interpolation=cv.INTER_AREA)
             self.roi = self.roi / max(1.0, np.max(self.roi))
 
         self.debug_dir = debug_dir
@@ -152,8 +146,8 @@ class TimestampAwareBackgroundSubtractor(object):
                 case "default_fps":
                     self.default_fps = float(v)
                     self.update_fps(delta_t=1.0 / self.default_fps, ema_alpha=1.0)
-                case "resize_scale":
-                    self.resize_scale = float(v)
+                case "target_size":
+                    self.target_size = tuple(map(int, v))
 
     def update_fps(self, delta_t: float, ema_alpha: float = 0.1):
         # Exponential moving average, or reset to default if delta_t is very large
@@ -163,14 +157,9 @@ class TimestampAwareBackgroundSubtractor(object):
             self.fps += (1.0 / delta_t - self.fps) * ema_alpha
 
     def preprocess(self, img: cv.Mat) -> cv.Mat:
-        if self.resize_scale < 1.0:
-            img = cv.resize(
-                img,
-                dsize=None,
-                fx=self.resize_scale,
-                fy=self.resize_scale,
-                interpolation=cv.INTER_AREA,
-            )
+        h, w = img.shape[:2]
+        if (w, h) != self.target_size:
+            img = cv.resize(img, dsize=self.target_size, interpolation=cv.INTER_AREA)
 
         if self.prep_blur > 0:
             img = cv.GaussianBlur(
@@ -225,6 +214,9 @@ class TimestampAwareBackgroundSubtractor(object):
     def applyWithStats(
         self, img: cv.Mat, t: Optional[float] = None
     ) -> tuple[cv.Mat, list[ForegroundBlob]]:
+        scale_w = self.target_size[0] / img.shape[1]
+        scale_h = self.target_size[1] / img.shape[0]
+
         mask, img = self.apply(img, t)
 
         # Get a copy of the avg bg image
@@ -246,7 +238,7 @@ class TimestampAwareBackgroundSubtractor(object):
         blobs = []
         for i in range(1, n_labels):
             # Drop any tiny blobs
-            if stats[i, cv.CC_STAT_AREA] < self.area_threshold * self.resize_scale**2:
+            if stats[i, cv.CC_STAT_AREA] < self.area_threshold * scale_w * scale_h:
                 continue
 
             if self.roi is not None:
@@ -258,7 +250,7 @@ class TimestampAwareBackgroundSubtractor(object):
             # background and image object references but has a different mask
             blobs.append(
                 ForegroundBlob(
-                    bbox=BoundingBox(*stats[i, :4]).unscale(self.resize_scale),
+                    bbox=BoundingBox(*stats[i, :4]).unscale((scale_w, scale_h)),
                     background=background,
                     image=img,
                     mask=np.array(labels == i).astype(np.uint8) * clean_mask,
