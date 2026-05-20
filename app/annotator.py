@@ -16,8 +16,9 @@ import numpy as np
 import yaml
 from flask import Flask, Response, jsonify, render_template, request
 
-from background_model import BoundingBox, TimestampAwareBackgroundSubtractor
-from image_loader import get_all_timestamped_files_sorted
+from app.background_model import TimestampAwareBackgroundSubtractor
+from app.utils import BoundingBox
+from app.image_loader import get_all_timestamped_files_sorted
 
 ANNOTATION_FILE = "annotations.json"
 

@@ -18,7 +18,7 @@ import requests
 import yaml
 
 from app.detection import create_detector
-from background_model import BoundingBox
+from app.utils import BoundingBox
 from camera_monitor import (
     CameraMonitor,
     State,

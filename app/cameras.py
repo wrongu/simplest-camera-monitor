@@ -8,7 +8,7 @@ import numpy as np
 import requests
 from onvif import ONVIFCamera
 
-from image_loader import get_all_timestamped_files_sorted
+from app.image_loader import get_all_timestamped_files_sorted
 
 
 class Camera(Protocol):

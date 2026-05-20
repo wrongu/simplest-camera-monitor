@@ -6,10 +6,9 @@ from typing import Optional, Callable
 import cv2 as cv
 
 from app.detection import DetectionModel
-from app.utils import get_logger
-from background_model import BoundingBox
-from cameras import Camera
-from image_loader import (
+from app.utils import get_logger, BoundingBox
+from app.cameras import Camera
+from app.image_loader import (
     create_timestamped_filename,
     get_all_timestamped_files_sorted,
     ensure_files_timestamp_named,

@@ -19,10 +19,10 @@ try:
 except ImportError:
     OnnxSession = None
 
-from app.background_model import BoundingBox, YoloBoundingBox, TimestampAwareBackgroundSubtractor
-from app.classifier import featurize
+from app.background_model import TimestampAwareBackgroundSubtractor
+from models.classifier import featurize
 from app.image_loader import get_all_timestamped_files_sorted
-from app.utils import get_logger
+from app.utils import get_logger, YoloBoundingBox, BoundingBox
 
 logger = get_logger("detection", batching=300)
 
