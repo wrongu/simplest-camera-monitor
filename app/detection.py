@@ -20,7 +20,7 @@ except ImportError:
     OnnxSession = None
 
 from app.background_model import TimestampAwareBackgroundSubtractor
-from models.classifier import featurize
+from app.classifier import featurize
 from app.image_loader import get_all_timestamped_files_sorted
 from app.utils import get_logger, YoloBoundingBox, BoundingBox
 
