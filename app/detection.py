@@ -151,8 +151,8 @@ class OnnxYoloDetectionModel(DetectionModel):
         image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
         h, w = image.shape[:2]
         if (w, h) != self.img_size:
-            # TODO pad to preserve aspect
-            image = cv.resize(image, self.img_size)
+            pad_w, pad_h = self.img_size[0] - w, self.img_size[1] - h
+            image = np.pad(image, [(0, pad_h), (0, pad_w), (0, 0)], mode="constant", constant_values=127)
         return (image.transpose(2, 0, 1)[None, ::-1, :, :] / 255).astype(np.float32)
 
     def initialize_from_logs(self, log_dir: Path, now: Optional[float] = None):
