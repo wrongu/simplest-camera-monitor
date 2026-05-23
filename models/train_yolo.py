@@ -13,6 +13,7 @@ def main():
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--freeze", type=int, default=10)
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=-1)
     parser.add_argument("--export", type=str, default=None, choices=["onnx", "engine", "coreml"])
     args = parser.parse_args()
 
@@ -22,6 +23,7 @@ def main():
     model.train(
         data=args.dataset,
         epochs=args.epochs,
+        batch=args.batch_size,
         imgsz=args.imgsz,
         freeze=args.freeze,
         device=device,
