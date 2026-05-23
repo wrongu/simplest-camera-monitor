@@ -22,14 +22,14 @@ Usage:
 
 import argparse
 import json
+import random
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 import cv2 as cv
+import imagesize
 import yaml
-
-from app.image_loader import timestamp_path_regex
 
 
 def load_raw_annotations(path: Path) -> tuple[dict, dict]:
@@ -42,17 +42,17 @@ def load_raw_annotations(path: Path) -> tuple[dict, dict]:
         raw = json.load(f)
     labels = raw.get("labels", {})
     images = {
-        k: v for k, v in raw.items() if k not in ("labels", "through") and isinstance(v, list)
+        str((path.parent / Path(k)).resolve()): v
+        for k, v in raw.items()
+        if k not in ("labels", "through") and isinstance(v, list)
     }
     return labels, images
 
 
 def image_key_to_date(key: str) -> str:
     """Extract YYYY-MM-DD from a key like '2024/01/15/123456.jpg'."""
-    m = timestamp_path_regex.match(key)
-    if m:
-        return f"{m['year']}-{m['month']}-{m['day']}"
-    return ""
+    parts = Path(key).parts
+    return f"{parts[-4]}-{parts[-3]}-{parts[-2]}"
 
 
 def detect_image_size(image_dir: Path, image_key: str) -> tuple[int, int]:
@@ -67,13 +67,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Export annotations.json to Ultralytics YOLO format (text-file mode)"
     )
-    parser.add_argument("annotations", type=Path, help="Path to annotations.json")
+    parser.add_argument("annotations", type=Path, nargs="+", help="Path to annotations.json")
     parser.add_argument("image_dir", type=Path, help="Root directory of source images")
     parser.add_argument(
         "output_dir",
         type=Path,
         help="Output directory for train.txt, val.txt, dataset.yaml. "
-             "Label .txt files go alongside the images in image_dir.",
+        "Label .txt files go alongside the images in image_dir.",
     )
     parser.add_argument(
         "--classes",
@@ -93,7 +93,7 @@ def main():
         "--val-days",
         type=int,
         metavar="N",
-        help="Use the last N calendar days of annotated data as val",
+        help="Use a total of N randomly chosen days for validation",
     )
 
     parser.add_argument(
@@ -104,34 +104,33 @@ def main():
     )
     args = parser.parse_args()
 
-    labels_dict, images_dict = load_raw_annotations(args.annotations)
+    yolo_names_to_ids = {c: i for i, c in enumerate(args.classes)}
+    images_dict = {}
+    for annot in args.annotations:
+        this_labels_dict, this_images_dict = load_raw_annotations(annot)
 
-    if not images_dict:
-        print("No annotated images found in annotations file.")
-        sys.exit(1)
+        if not this_images_dict:
+            print("No annotated images found in annotations file.")
+            sys.exit(1)
 
-    # Resolve selected classes -> annotation label IDs
-    name_to_annot_id = {name: lid for lid, name in labels_dict.items()}
-    unknown = [c for c in args.classes if c not in name_to_annot_id]
-    if unknown:
-        print(f"WARNING: classes not found in annotations: {unknown}")
-        print(f"  Available: {sorted(labels_dict.values())}")
-    annot_id_to_yolo = {
-        name_to_annot_id[c]: i for i, c in enumerate(args.classes) if c in name_to_annot_id
-    }
-    if not annot_id_to_yolo:
-        print("No selected classes found. Nothing to export.")
-        sys.exit(1)
+        # Resolve selected classes -> annotation label IDs
+        name_to_annot_id = {name: lid for lid, name in this_labels_dict.items()}
+        unknown = [c for c in args.classes if c not in name_to_annot_id]
+        if unknown:
+            print(f"WARNING: classes not found in annotations: {unknown}")
+            print(f"  Available: {sorted(this_labels_dict.values())}")
 
-    # Image size
-    if args.image_size:
-        img_w, img_h = (int(v) for v in args.image_size.split("x"))
-        print(f"Using specified image size: {img_w}x{img_h}")
-    else:
-        first_key = next(iter(images_dict))
-        print(f"Auto-detecting image size from {first_key} ...")
-        img_w, img_h = detect_image_size(args.image_dir, first_key)
-        print(f"  Detected: {img_w}x{img_h}")
+        for im, boxes in this_images_dict.items():
+            keep_boxes = []
+            for box in boxes:
+                if this_labels_dict[box["label"]] in yolo_names_to_ids:
+                    keep_boxes.append(
+                        {**box, "label": yolo_names_to_ids[this_labels_dict[box["label"]]]}
+                    )
+            if keep_boxes:
+                images_dict[im] = keep_boxes
+
+        del this_images_dict, this_labels_dict, name_to_annot_id, unknown
 
     # Determine val cutoff date
     all_dates = sorted(set(image_key_to_date(k) for k in images_dict if image_key_to_date(k)))
@@ -140,21 +139,18 @@ def main():
         sys.exit(1)
 
     if args.val_after:
-        val_cutoff = args.val_after
+        val_days = set(filter(lambda day: day >= args.val_after, all_dates))
     else:
         if args.val_days >= len(all_dates):
             print(
                 f"WARNING: --val-days {args.val_days} >= total days {len(all_dates)}; using last day only for val"
             )
-            val_cutoff = all_dates[-1]
+            val_days = {all_dates[-1]}
         else:
-            val_cutoff = all_dates[-args.val_days]
-
-    print(
-        f"Val split: dates >= {val_cutoff}"
-        f"  ({sum(d >= val_cutoff for d in all_dates)} val days,"
-        f" {sum(d < val_cutoff for d in all_dates)} train days)"
-    )
+            random.seed(98412)
+            shuffle_days = list(all_dates)
+            random.shuffle(shuffle_days)
+            val_days = set(shuffle_days[: args.val_days])
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -165,12 +161,10 @@ def main():
     for image_key, boxes in images_dict.items():
         lines = []
         for box in boxes:
-            lid = str(box.get("label") if isinstance(box, dict) else box["label"])
-            if lid in (None, "None") or lid not in annot_id_to_yolo:
-                continue
             bbox = box["bbox"] if isinstance(box, dict) else box.bbox
             x, y, bw, bh = bbox
-            yolo_cls = annot_id_to_yolo[lid]
+            yolo_cls = box["label"]
+            img_w, img_h = imagesize.get(image_key)
             cx = max(0.0, min(1.0, (x + bw / 2) / img_w))
             cy = max(0.0, min(1.0, (y + bh / 2) / img_h))
             nw = max(0.0, min(1.0, bw / img_w))
@@ -184,17 +178,16 @@ def main():
         # Write label file NEXT TO the source image so Ultralytics can find it.
         # Ultralytics resolves labels by swapping the extension when there is no
         # /images/ component in the path: image.jpg -> image.txt
-        label_path = args.image_dir / Path(image_key).with_suffix(".txt")
+        label_path = Path(image_key).with_suffix(".txt")
         label_path.write_text("\n".join(lines) + "\n")
 
         # Assign to split
         date = image_key_to_date(image_key)
-        split = "val" if date >= val_cutoff else "train"
-        abs_image = str((args.image_dir / image_key).resolve())
+        split = "val" if date in val_days else "train"
         if split == "train":
-            train_images.append(abs_image)
+            train_images.append(image_key)
         else:
-            val_images.append(abs_image)
+            val_images.append(image_key)
 
         for line in lines:
             cls_idx = int(line.split()[0])
