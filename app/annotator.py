@@ -4,6 +4,7 @@ import os
 import signal
 import sys
 import threading
+import time
 import webbrowser
 from collections import deque
 from dataclasses import dataclass, field
@@ -19,8 +20,6 @@ from flask import Flask, Response, jsonify, render_template, request
 from app.background_model import TimestampAwareBackgroundSubtractor
 from app.utils import BoundingBox
 from app.image_loader import get_all_timestamped_files_sorted
-
-ANNOTATION_FILE = "annotations.json"
 
 # Sentinel used to mark a prefetch slot that has a thread running but hasn't finished yet.
 _PREFETCH_PENDING = object()
@@ -56,6 +55,7 @@ class AnnotationFile:
     """Represents the full annotations.json on disk."""
 
     labels: dict = field(default_factory=dict)  # {label_id: name}
+    start: Optional[str] = None  # first image key where this file starts
     through: Optional[str] = None  # last-processed image key
     images: dict = field(default_factory=dict)  # {image_key: list[LabeledBox]}
 
@@ -72,6 +72,7 @@ class AnnotationFile:
         }
         return cls(
             labels=raw.get("labels", {}),
+            start=raw.get("start"),
             through=raw.get("through"),
             images=images,
         )
@@ -80,6 +81,8 @@ class AnnotationFile:
         if through_key is not None:
             self.through = through_key
         raw: dict = {"labels": self.labels}
+        if self.start is not None:
+            raw["start"] = self.start
         if self.through is not None:
             raw["through"] = self.through
         for k, v in self.images.items():
@@ -146,18 +149,6 @@ def _iou(b1: LabeledBox, b2: LabeledBox) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def _apply_prior_annotations(blobs: list, prior_annots: list, iou_threshold: float = 0.5):
-    """Pre-populate blob labels from a prior annotation set via IoU matching."""
-    for blob in blobs:
-        best_iou, best_label = 0.0, None
-        for prior in prior_annots:
-            iou = _iou(blob, prior)
-            if iou > best_iou:
-                best_iou, best_label = iou, prior.label
-        if best_label is not None and best_iou > iou_threshold:
-            blob.label = best_label
-
-
 # ─── Annotator state ──────────────────────────────────────────────────────────
 
 
@@ -171,25 +162,27 @@ class AnnotatorState:
         self,
         image_dir: Path,
         bg_model: TimestampAwareBackgroundSubtractor,
-        prior_annotations: dict,  # {image_key: list[LabeledBox]}
+        labels_dict: dict[str, str],
         skip_no_motion: bool,
         paused: bool,
+        start_key: Optional[str],
     ):
         self.lock = threading.Lock()
 
-        self.image_dir = image_dir
-        self.annot_file = image_dir / ANNOTATION_FILE
-        self.bg_model = bg_model
-        self.prior_annotations = prior_annotations
+        annot_uid = int(time.time())
 
-        self.annot = AnnotationFile.load(self.annot_file)
+        self.image_dir = image_dir
+        self.annot_file = image_dir / f"annotations.{annot_uid}.json"
+        self.bg_model = bg_model
+
+        self.annot = AnnotationFile(labels=labels_dict, start=start_key)
 
         # Full sorted file list. Stored so we can index into it for prefetching.
         self._all_files: list = list(get_all_timestamped_files_sorted(image_dir))
         self._total_files: int = len(self._all_files)
 
         # Index into _all_files; the next file to process.
-        self._iter_idx: int = self._find_resume_idx()
+        self._iter_idx: int = self._find_resume_idx(start_key)
 
         # file_index counts how many files from _all_files have been visited.
         # Initialised to the resume offset so progress is correct on resume.
@@ -201,8 +194,7 @@ class AnnotatorState:
 
         # Reverse lookup: image key → index in _all_files. Used for backward navigation past the resume point.
         self._key_to_idx: dict = {
-            str(fn.relative_to(self.image_dir)): i
-            for i, (_, fn) in enumerate(self._all_files)
+            str(fn.relative_to(self.image_dir)): i for i, (_, fn) in enumerate(self._all_files)
         }
 
         # Prefetch cache: str(filename) → tuple[bytes (raw JPEG), cv.Mat (loaded img)] or _PREFETCH_PENDING.
@@ -224,9 +216,9 @@ class AnnotatorState:
 
     # ── Resume helpers ────────────────────────────────────────────────────────
 
-    def _find_resume_idx(self) -> int:
+    def _find_resume_idx(self, start_key: Optional[str] = None) -> int:
         """Return the index of the first file at or after the `through` key."""
-        through = self.annot.through
+        through = start_key if start_key is not None else self.annot.through
         if through is None:
             return 0
         for i, (ts, fn) in enumerate(self._all_files):
@@ -384,11 +376,6 @@ class AnnotatorState:
                     self.annot.save(self.annot_file, through_key=key)
 
             img_bytes, bboxes = self._process_image(timestamp, filename)
-
-            # Pre-populate labels from prior annotations via IoU matching.
-            prior = self.prior_annotations.get(key, [])
-            if prior and key not in self.annot.images:
-                _apply_prior_annotations(bboxes, prior)
 
             needs_pause = bool(bboxes) or not self._skipping
 
@@ -562,11 +549,14 @@ def create_app(state: AnnotatorState) -> Flask:
 def main(
     image_dir: Path,
     bg_model: TimestampAwareBackgroundSubtractor,
-    prior_annotations: dict,
+    labels_dict: Optional[dict[str, str]] = None,
     skip_no_motion: bool = False,
     paused: bool = False,
+    start_key: Optional[str] = None,
 ):
-    state = AnnotatorState(image_dir, bg_model, prior_annotations, skip_no_motion, paused)
+    if labels_dict is None:
+        labels_dict = {}
+    state = AnnotatorState(image_dir, bg_model, labels_dict, skip_no_motion, paused, start_key)
     pprint(state.annot.labels)
 
     # Load the first frame synchronously before starting the server.
@@ -596,12 +586,6 @@ if __name__ == "__main__":
     parser.add_argument("image_dir", type=Path, help="Directory with images")
     parser.add_argument("bg_model_config", type=Path, help="Path to background model config")
     parser.add_argument(
-        "--prior-annotations",
-        default=None,
-        type=Path,
-        help="Path to existing annotations to use as label defaults",
-    )
-    parser.add_argument(
         "--skip-no-motion",
         action="store_true",
         help="Auto-advance frames with no detected motion (still displayed; user can interrupt).",
@@ -610,6 +594,11 @@ if __name__ == "__main__":
         "--paused",
         action="store_true",
         help="Start with skip mode off, pausing on every frame regardless of motion.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Find latest annotations file and pick up where that one left off.",
     )
     args = parser.parse_args()
 
@@ -627,17 +616,21 @@ if __name__ == "__main__":
         bg_config = yaml.safe_load(f)
     model = TimestampAwareBackgroundSubtractor(**bg_config)
 
-    prior_annotations: dict = {}
-    if args.prior_annotations is not None:
-        if not args.prior_annotations.exists():
-            print("Prior annotations file not found:", args.prior_annotations)
-            sys.exit(1)
-        with open(args.prior_annotations, "r") as f:
-            raw = json.load(f)
-        prior_annotations = {
-            k: [LabeledBox.from_dict(b) for b in v]
-            for k, v in raw.items()
-            if k not in ("labels", "through") and isinstance(v, list)
-        }
+    latest = None
+    labels = {}
+    if args.resume:
+        for exist_annot in Path(image_dir).glob("*.json"):
+            with open(exist_annot, "r") as f:
+                annot = json.load(f)
+            if "through" in annot and (latest is None or annot["through"] > latest):
+                latest = annot["through"]
+                labels = annot["labels"]
 
-    main(image_dir, model, prior_annotations, args.skip_no_motion, args.paused)
+    main(
+        image_dir=image_dir,
+        bg_model=model,
+        labels_dict=labels,
+        skip_no_motion=args.skip_no_motion,
+        paused=args.paused,
+        start_key=latest,
+    )
