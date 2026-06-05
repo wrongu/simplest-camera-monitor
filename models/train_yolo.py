@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import torch
 from ultralytics import YOLO
 
 
@@ -10,24 +9,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-model", type=Path, default=Path("models") / "yolo26n.pt")
     parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--freeze", type=int, default=10)
-    parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=-1)
+    parser.add_argument(
+        "--cfg", type=Path, default=None, help="Further config options in yaml training config file"
+    )
     parser.add_argument("--export", type=str, default=None, choices=["onnx", "engine", "coreml"])
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.cfg is not None:
+        assert args.cfg.exists()
 
     model = YOLO(str(args.base_model), task="detect")
-    model.train(
-        data=args.dataset,
-        epochs=args.epochs,
-        batch=args.batch_size,
-        imgsz=args.imgsz,
-        freeze=args.freeze,
-        device=device,
-    )
+    model.train(data=args.dataset, cfg=args.cfg)
 
     if args.export:
         model.export(format=args.export)
