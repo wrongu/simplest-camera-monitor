@@ -67,7 +67,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Export annotations.json to Ultralytics YOLO format (text-file mode)"
     )
-    parser.add_argument("annotations", type=Path, nargs="+", help="Path to annotations.json")
+    parser.add_argument(
+        "annotations",
+        type=Path,
+        nargs="+",
+        help="Path to annotations.json or directory containing them",
+    )
     parser.add_argument("image_dir", type=Path, help="Root directory of source images")
     parser.add_argument(
         "output_dir",
@@ -81,6 +86,14 @@ def main():
         required=True,
         metavar="CLASS",
         help="Class names to export in order (become YOLO class IDs 0, 1, ...)",
+    )
+    parser.add_argument(
+        "--neg-classes",
+        nargs="+",
+        metavar="NEG_CLASS",
+        help="Classes to use as an explicit source of negative examples. If an image is tagged as containing a "
+        "negative class but none of the positive classes, it will be added to the yolo data as an image with no "
+        "annotations.",
     )
 
     split_group = parser.add_mutually_exclusive_group(required=True)
@@ -104,6 +117,11 @@ def main():
     )
     args = parser.parse_args()
 
+    for i, annot in enumerate(args.annotations):
+        if annot.is_dir():
+            args.annotations.extend(annot.glob("annot*.json"))
+    args.annotations = [a for a in args.annotations if a.is_file()]
+
     yolo_names_to_ids = {c: i for i, c in enumerate(args.classes)}
     images_dict = {}
     for annot in args.annotations:
@@ -121,13 +139,18 @@ def main():
             print(f"  Available: {sorted(this_labels_dict.values())}")
 
         for im, boxes in this_images_dict.items():
-            keep_boxes = []
+            keep_boxes, has_neg_class = [], False
             for box in boxes:
                 if this_labels_dict[box["label"]] in yolo_names_to_ids:
                     keep_boxes.append(
                         {**box, "label": yolo_names_to_ids[this_labels_dict[box["label"]]]}
                     )
-            if keep_boxes:
+                elif this_labels_dict[box["label"]] in args.neg_classes:
+                    has_neg_class = True
+
+            # If there are any *positive* samples, store them. If there are *no* positive samples but there *are* neg
+            # samples, also keep this image for training but with no labels
+            if keep_boxes or has_neg_class:
                 images_dict[im] = keep_boxes
 
         del this_images_dict, this_labels_dict, name_to_annot_id, unknown
@@ -156,7 +179,7 @@ def main():
 
     train_images, val_images = [], []
     class_counts = {"train": defaultdict(int), "val": defaultdict(int)}
-    skipped = 0
+    n_neg = 0
 
     for image_key, boxes in images_dict.items():
         lines = []
@@ -172,7 +195,7 @@ def main():
             lines.append(f"{yolo_cls} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
 
         if not lines:
-            skipped += 1
+            n_neg += 1
             continue
 
         # Write label file NEXT TO the source image so Ultralytics can find it.
@@ -212,7 +235,7 @@ def main():
     print(f"\nDone.")
     print(f"  Train images: {len(train_images)}")
     print(f"  Val images  : {len(val_images)}")
-    print(f"  Skipped (no matching class): {skipped}")
+    print(f"  Neg images: {n_neg}")
     print(f"  Annotations by class:")
     for cls in args.classes:
         t = class_counts["train"][cls]
