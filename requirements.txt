@@ -8,3 +8,4 @@ flask
 onnx
 onnxruntime
 onnxslim
+portion

@@ -8,18 +8,19 @@ import time
 import webbrowser
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
-from pprint import pprint
 from typing import Optional
 
 import cv2 as cv
 import numpy as np
+import portion
 import yaml
 from flask import Flask, Response, jsonify, render_template, request
 
 from app.background_model import TimestampAwareBackgroundSubtractor
-from app.utils import BoundingBox
 from app.image_loader import get_all_timestamped_files_sorted
+from app.utils import BoundingBox
 
 # Sentinel used to mark a prefetch slot that has a thread running but hasn't finished yet.
 _PREFETCH_PENDING = object()
@@ -89,6 +90,15 @@ class AnnotationFile:
             raw[k] = [b.to_dict() for b in v]
         with open(path, "w") as f:
             json.dump(raw, f, indent=2)
+
+    def get_interval(self, fudge: bool = False) -> portion.Interval | None:
+        if self.start is None or self.through is None:
+            return None
+        delta = timedelta(seconds=30) if fudge else timedelta(0)
+        return portion.closed(
+            lower=datetime.strptime(self.start.replace("\\", "/"), "%Y/%m/%d/%H%M%S.jpg") - delta,
+            upper=datetime.strptime(self.through.replace("\\", "/"), "%Y/%m/%d/%H%M%S.jpg") + delta,
+        )
 
 
 @dataclass
@@ -166,6 +176,7 @@ class AnnotatorState:
         skip_no_motion: bool,
         paused: bool,
         start_key: Optional[str],
+        end_key: Optional[str],
     ):
         self.lock = threading.Lock()
 
@@ -180,6 +191,7 @@ class AnnotatorState:
         # Full sorted file list. Stored so we can index into it for prefetching.
         self._all_files: list = list(get_all_timestamped_files_sorted(image_dir))
         self._total_files: int = len(self._all_files)
+        self._end_key = end_key
 
         # Index into _all_files; the next file to process.
         self._iter_idx: int = self._find_resume_idx(start_key)
@@ -353,7 +365,9 @@ class AnnotatorState:
 
             key = str(filename.relative_to(self.image_dir))
 
-            if key in self.annot.images:
+            if self._end_key is not None and key > self._end_key:
+                break
+            elif key in self.annot.images:
                 # Already annotated: add to burn-through queue and move on.
                 self._recent_skipped.append((timestamp, filename))
                 continue
@@ -459,7 +473,7 @@ class AnnotatorState:
             self.annot.save(self.annot_file, through_key=self.current_key)
             self._done = True
             threading.Thread(
-                target=lambda: os.kill(os.getpid(), signal.SIGINT), daemon=True
+                target=lambda: os.kill(os.getpid(), signal.CTRL_C_EVENT), daemon=True
             ).start()
 
     # ── State snapshot ────────────────────────────────────────────────────────
@@ -544,20 +558,49 @@ def create_app(state: AnnotatorState) -> Flask:
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
+def get_parser():
+    parser = argparse.ArgumentParser(description="Image annotation tool")
+    parser.add_argument("image_dir", type=Path, help="Directory with images")
+    parser.add_argument("bg_model_config", type=Path, help="Path to background model config")
+    parser.add_argument(
+        "--skip-no-motion",
+        action="store_true",
+        help="Auto-advance frames with no detected motion (still displayed; user can interrupt).",
+    )
+    parser.add_argument(
+        "--paused",
+        action="store_true",
+        help="Start with skip mode off, pausing on every frame regardless of motion.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Find latest annotations file and pick up where that one left off.",
+    )
+    parser.add_argument(
+        "--interval",
+        nargs="*",
+        default=None,
+        help="two arguments 'start_key end_key' each in YYYY/MM/DD/HHMMSS format. "
+        "If provided, this annotation session will run only for that interval.",
+    )
+    return parser
 
 
-def main(
+def run_app(
     image_dir: Path,
     bg_model: TimestampAwareBackgroundSubtractor,
     labels_dict: Optional[dict[str, str]] = None,
     skip_no_motion: bool = False,
     paused: bool = False,
     start_key: Optional[str] = None,
+    end_key: Optional[str] = None,
 ):
     if labels_dict is None:
         labels_dict = {}
-    state = AnnotatorState(image_dir, bg_model, labels_dict, skip_no_motion, paused, start_key)
-    pprint(state.annot.labels)
+    state = AnnotatorState(
+        image_dir, bg_model, labels_dict, skip_no_motion, paused, start_key, end_key
+    )
 
     # Load the first frame synchronously before starting the server.
     state._do_load_next_from_iterator()
@@ -581,26 +624,7 @@ def main(
         print(f"Annotations saved to {state.annot_file}")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Image annotation tool")
-    parser.add_argument("image_dir", type=Path, help="Directory with images")
-    parser.add_argument("bg_model_config", type=Path, help="Path to background model config")
-    parser.add_argument(
-        "--skip-no-motion",
-        action="store_true",
-        help="Auto-advance frames with no detected motion (still displayed; user can interrupt).",
-    )
-    parser.add_argument(
-        "--paused",
-        action="store_true",
-        help="Start with skip mode off, pausing on every frame regardless of motion.",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Find latest annotations file and pick up where that one left off.",
-    )
-    args = parser.parse_args()
+def main(args):
 
     image_dir = args.image_dir
     images = list(get_all_timestamped_files_sorted(image_dir))
@@ -614,23 +638,36 @@ if __name__ == "__main__":
 
     with open(args.bg_model_config, "r") as f:
         bg_config = yaml.safe_load(f)
-    model = TimestampAwareBackgroundSubtractor(**bg_config)
+    bg_model = TimestampAwareBackgroundSubtractor(**bg_config)
 
-    latest = None
-    labels = {}
+    start_key = None
+    labels_dict = {}
     if args.resume:
         for exist_annot in Path(image_dir).glob("*.json"):
             with open(exist_annot, "r") as f:
                 annot = json.load(f)
             if "through" in annot and (latest is None or annot["through"] > latest):
                 latest = annot["through"]
-                labels = annot["labels"]
+                labels_dict = annot["labels"]
+        start_key = latest
 
-    main(
+    end_key = None
+    if args.interval:
+        assert not args.resume
+        assert len(args.interval) == 2
+        start_key, end_key = args.interval
+
+    run_app(
         image_dir=image_dir,
-        bg_model=model,
-        labels_dict=labels,
+        bg_model=bg_model,
+        labels_dict=labels_dict,
         skip_no_motion=args.skip_no_motion,
         paused=args.paused,
-        start_key=latest,
+        start_key=start_key,
+        end_key=end_key,
     )
+
+
+if __name__ == "__main__":
+    args = get_parser().parse_args()
+    main(args)
