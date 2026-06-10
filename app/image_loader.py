@@ -1,3 +1,4 @@
+import functools
 import os
 import re
 import time
@@ -57,6 +58,7 @@ def get_file_time(file: Path) -> float:
         return int(file.stat().st_mtime)
 
 
+@functools.cache
 def get_all_timestamped_files_sorted(
     directory: Path, glob="**/*.jpg"
 ) -> list[tuple[float, Path]]:
