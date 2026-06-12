@@ -166,6 +166,12 @@ class BoundingBox:
         return img
 
 
+def chain_callbacks(*fns):
+    def callback(*args, **kwargs):
+        for fn in fns:
+            fn(*args, **kwargs)
+    return callback
+
 
 __all__ = [
     "BoundingBox",
@@ -173,4 +179,5 @@ __all__ = [
     "LogHandler",
     "LogLevel",
     "get_logger",
+    "chain_callbacks",
 ]

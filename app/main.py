@@ -4,8 +4,11 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
+from functools import partial
 from pathlib import Path
 from typing import Optional
+
+from app.image_loader import create_timestamped_filename
 
 try:
     import app
@@ -18,16 +21,15 @@ import requests
 import yaml
 
 from app.detection import create_detector
-from app.utils import BoundingBox
-from camera_monitor import (
+from app.utils import BoundingBox, chain_callbacks, get_logger
+from app.camera_monitor import (
     CameraMonitor,
     State,
     OnDetectionCallback,
     OnStateTransitionCallback,
     OnGetImageCallback,
 )
-from cameras import ONVIFCameraWrapper
-from utils import get_logger
+from app.cameras import ONVIFCameraWrapper
 
 ONE_DAY_SECONDS = 24 * 60 * 60
 
@@ -148,6 +150,18 @@ def make_handle_detections(
     return handle_detections
 
 
+def save_detection_snapshot(save_dir: Path, monitor: CameraMonitor, detections: list[BoundingBox]):
+    if detections:
+        ts, frame = monitor.camera.get_last_frame()
+        if frame is not None:
+            save_file = save_dir / create_timestamped_filename(ts, ".jpg")
+            save_file.parent.mkdir(exist_ok=True, parents=True)
+            annotated_frame = frame.copy()
+            for det in detections:
+                annotated_frame = det.draw(annotated_frame, color=(255, 150, 0))
+            cv2.imwrite(str(save_file.resolve()), annotated_frame)
+
+
 # ---------------------------------------------------------------------------
 # Camera initialisation (mirrors app.py initialize())
 # ---------------------------------------------------------------------------
@@ -162,6 +176,13 @@ def init_monitors(
 ) -> list[CameraMonitor]:
     monitor_slots: list[CameraMonitor | None] = [None] * len(config["cameras"])
     media_root = Path(config.get("media_root", "/media"))
+
+    if config.get("save_detections", False):
+        snapshot_callback = partial(save_detection_snapshot, media_root / "detections")
+        if on_detection is not None:
+            on_detection = chain_callbacks(on_detection, snapshot_callback)
+        else:
+            on_detection = snapshot_callback
 
     def init_camera(i, cam_config):
         cam_name = cam_config.get("name", str(i))
@@ -342,7 +363,7 @@ def main():
     monitors = init_monitors(
         config,
         on_state_transition=handle_state,
-        on_detection=handle_detections,
+        on_detection=[handle_detections, partial(save_detection_snapshot, Path())],
     )
     if not monitors:
         logger.error("No cameras initialized. Exiting.")
