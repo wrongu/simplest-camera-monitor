@@ -127,9 +127,9 @@ def main():
     for annot in args.annotations:
         this_labels_dict, this_images_dict = load_raw_annotations(annot)
 
-        if not this_images_dict:
+        if not this_images_dict or not this_labels_dict:
             print("No annotated images found in annotations file.")
-            sys.exit(1)
+            continue
 
         # Resolve selected classes -> annotation label IDs
         name_to_annot_id = {name: lid for lid, name in this_labels_dict.items()}

@@ -34,7 +34,7 @@ if __name__ == "__main__":
         if interval is not None:
             exist_intervals |= interval
 
-    for interval in intervals:
+    for interval in reversed(intervals):
         print(interval)
         if interval_covered(interval, exist_intervals):
             print("-skip-")
