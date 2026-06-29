@@ -115,9 +115,9 @@ class YoloDetectionModel(DetectionModel):
             for yolo_box in det.boxes:
                 box = BoundingBox.from_yolo(
                     YoloBoundingBox(
-                        *yolo_box.xywh.flatten().numpy(),
+                        *yolo_box.xywh.flatten().cpu().numpy(),
                         yolo_box.conf.item(),
-                        yolo_box.cls.numpy().astype(int).item(),
+                        yolo_box.cls.cpu().numpy().astype(int).item(),
                     ),
                     self.yolo.names,
                 )
