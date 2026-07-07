@@ -19,6 +19,78 @@
   #toolbar .progress { color: #aaa; white-space: nowrap; }
   #toolbar .key { color: #7cf; font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 
+  /* ── Timeline ───────────────────────────────────────────────────────────── */
+  #timeline-wrap {
+    background: #181818;
+    border-bottom: 1px solid #333;
+    flex-shrink: 0;
+    max-height: 160px;
+    overflow-y: auto;
+    padding: 4px 8px;
+  }
+  /* individual segment row */
+  .tl-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+  }
+  .tl-label {
+    font-size: 10px;
+    color: #666;
+    white-space: nowrap;
+    min-width: 110px;
+    flex-shrink: 0;
+    user-select: none;
+  }
+  .tl-bar {
+    flex: 1;
+    height: 16px;
+    position: relative;
+    background: #2a1a0a;  /* unannotated: dark brownish */
+    border-radius: 2px;
+    cursor: crosshair;
+    overflow: hidden;
+  }
+  /* absolute children of .tl-bar — all full height */
+  .tl-segment {
+    position: absolute;
+    top: 0; height: 100%;
+    pointer-events: none;
+  }
+  .tl-covered  { background: #1a4a1a; }   /* pre-existing: dark green */
+  .tl-session  { background: #2d7a2d; }   /* current session: lighter green */
+  .tl-cursor {
+    position: absolute;
+    top: 0; height: 100%;
+    width: 2px;
+    background: #ff0;
+    pointer-events: none;
+    display: none;
+  }
+  /* gap-between-segments divider */
+  .tl-divider {
+    font-size: 10px;
+    color: #444;
+    text-align: center;
+    padding: 1px 0 3px;
+    user-select: none;
+  }
+  /* tooltip */
+  #tl-tooltip {
+    display: none;
+    position: fixed;
+    background: #333;
+    color: #eee;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-size: 11px;
+    pointer-events: none;
+    border: 1px solid #555;
+    z-index: 200;
+    white-space: nowrap;
+  }
+
   #main {
     display: flex;
     flex: 1;
@@ -43,7 +115,6 @@
     image-rendering: pixelated;
   }
 
-  /* Progress bar shown while auto-advancing through no-motion frames */
   #autoadvance-bar {
     display: none;
     position: absolute;
@@ -52,11 +123,7 @@
     background: #333;
   }
   #autoadvance-bar.visible { display: block; }
-  #autoadvance-fill {
-    height: 100%;
-    width: 0%;
-    background: #4af;
-  }
+  #autoadvance-fill { height: 100%; width: 0%; background: #4af; }
 
   #done-overlay {
     display: none;
@@ -73,7 +140,7 @@
   #done-overlay.visible { display: flex; }
 
   #sidebar {
-    width: 200px;
+    width: 220px;
     background: #222;
     border-left: 1px solid #444;
     display: flex;
@@ -90,7 +157,7 @@
     letter-spacing: 0.05em;
     color: #aaa;
   }
-  #labels-list { padding: 8px; flex: 1; }
+  #labels-list { padding: 8px; }
   .label-item {
     display: flex;
     align-items: center;
@@ -111,12 +178,46 @@
   .label-name { color: #ccc; }
   .label-item.undefined .label-name { color: #666; font-style: italic; }
 
+  /* ── Jump-to-date widget ────────────────────────────────────────────────── */
+  #jump-section { flex-shrink: 0; }
+  #jump-controls {
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  #jump-datetime {
+    width: 100%;
+    background: #1a1a1a;
+    border: 1px solid #555;
+    color: #eee;
+    padding: 4px 6px;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 12px;
+    color-scheme: dark;
+  }
+  #jump-datetime:focus { outline: none; border-color: #7cf; }
+  #jump-btn {
+    width: 100%;
+    padding: 5px;
+    background: #1a4a1a;
+    border: 1px solid #2a7a2a;
+    color: #cfc;
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: monospace;
+    font-size: 12px;
+  }
+  #jump-btn:hover { background: #256a25; }
+
   #shortcuts {
     padding: 8px 10px;
     border-top: 1px solid #444;
     font-size: 11px;
     color: #666;
     line-height: 1.8;
+    flex: 1;
   }
   #shortcuts span { color: #888; }
 
@@ -128,6 +229,7 @@
     gap: 8px;
     flex-shrink: 0;
     align-items: center;
+    flex-wrap: wrap;
   }
   button {
     background: #3a3a3a;
@@ -144,12 +246,15 @@
   button:active { background: #555; }
   button.primary { background: #1a5a1a; border-color: #2a7a2a; }
   button.primary:hover { background: #256a25; }
-  button.skip.on { background: #555; border-color: #888; color: #fff; }
+  button.skip.on  { background: #555; border-color: #888; color: #fff; }
   button.skip.off { background: #222; border-color: #555; color: #888; }
   button.danger { background: #5a1a1a; border-color: #7a2a2a; }
   button.danger:hover { background: #6a2525; }
+  button.gap-nav { background: #252535; border-color: #445; color: #99c; }
+  button.gap-nav:hover { background: #303050; }
 
-  /* Speed control widget */
+  #gap-separator { width: 1px; background: #444; height: 24px; margin: 0 2px; flex-shrink: 0; }
+
   #speed-widget {
     margin-left: auto;
     display: flex;
@@ -162,8 +267,7 @@
   #speed-widget label { white-space: nowrap; }
   #delay-slider {
     -webkit-appearance: none;
-    width: 100px;
-    height: 4px;
+    width: 100px; height: 4px;
     border-radius: 2px;
     background: #555;
     outline: none;
@@ -190,7 +294,6 @@
 
   #box-count { color: #888; white-space: nowrap; }
 
-  /* Label name modal */
   #modal-overlay {
     display: none;
     position: fixed;
@@ -231,6 +334,11 @@
   <span class="key" id="current-key">—</span>
 </div>
 
+<div id="timeline-wrap">
+  <div id="timeline-segments"></div>
+</div>
+<div id="tl-tooltip"></div>
+
 <div id="main">
   <div id="canvas-wrap">
     <canvas id="canvas"></canvas>
@@ -244,6 +352,15 @@
   <div id="sidebar">
     <h3>Labels (0–9)</h3>
     <div id="labels-list"></div>
+
+    <h3>Jump to date</h3>
+    <div id="jump-section">
+      <div id="jump-controls">
+        <input type="datetime-local" id="jump-datetime" />
+        <button id="jump-btn" onclick="jumpToDatetime()">Go →</button>
+      </div>
+    </div>
+
     <div id="shortcuts">
       <span>0–9</span> label active box<br>
       <span>Tab</span> cycle selection<br>
@@ -256,6 +373,7 @@
       <span>+</span> / <span>-</span> speed<br>
       <span>C</span> copy boxes<br>
       <span>V</span> paste boxes<br>
+      <span>[</span> / <span>]</span> gap nav<br>
       <span>RClick drag</span> draw box<br>
       <span>LClick</span> select box
     </div>
@@ -269,6 +387,10 @@
   <button class="skip on" onclick="userNavigate('toggle_skip')" id="toggle-skip">Skip: On (S)</button>
   <button class="danger" onclick="confirmQuit()">Quit (Esc)</button>
   <span id="box-count"></span>
+
+  <div id="gap-separator"></div>
+  <button class="gap-nav" onclick="jumpToGap(-1)">&laquo; Gap ([)</button>
+  <button class="gap-nav" onclick="jumpToGap(1)">(&raquo; Gap (])</button>
 
   <div id="speed-widget">
     <label>Delay:</label>
@@ -295,24 +417,245 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const img = new Image();
 
-let serverState = null;   // last FrameState received from the server
-let localBoxes = [];      // [{x, y, w, h, label: str|null}]
+let serverState = null;
+let localBoxes = [];
 let activeIdx = -1;
-let dragStart = null;     // {x, y} image-pixel coords during right-click drag
+let dragStart = null;
 let scaleX = 1, scaleY = 1;
 
-let loopRunning = false;  // true while the auto-advance loop is active
-let advanceDelayMs = 0;   // current user-configured delay (from slider)
-
-let bboxClipboard = null; // list of box objects copied via 'c'
-
-// Timing: measure time from navigate() call to image ready, shown to user.
+let loopRunning = false;
+let advanceDelayMs = 0;
+let bboxClipboard = null;
 let navigateCalledAt = null;
 let lastProcMs = null;
 
 const COLOR_UNLABELED = '#f55';
 const COLOR_LABELED   = '#4d4';
 const COLOR_ACTIVE    = '#ff0';
+
+// ─── Timeline ────────────────────────────────────────────────────────────────
+let coverageData = null;   // last /api/coverage response
+const tlTooltip = document.getElementById('tl-tooltip');
+
+function _isoToMs(s) { return s ? new Date(s).getTime() : null; }
+
+function _fmtDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'});
+}
+
+function _fmtTime(iso) {
+  return new Date(iso).toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+}
+
+function _fmtDuration(ms) {
+  const totalMin = Math.round(ms / 60000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  if (d > 0) return `${d}d ${h}h gap`;
+  if (h > 0) return `${h}h ${m}m gap`;
+  return `${m}m gap`;
+}
+
+function _fmtDatetime(ms) {
+  const d = new Date(ms);
+  return d.toLocaleDateString(undefined, {month:'short', day:'numeric'})
+    + ' ' + d.toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+
+/** Build the full timeline DOM from coverageData. Called once after fetchCoverage. */
+function buildTimeline() {
+  const container = document.getElementById('timeline-segments');
+  container.innerHTML = '';
+  if (!coverageData?.segments?.length) return;
+
+  const segs = coverageData.segments;
+  segs.forEach((seg, i) => {
+    const t0 = _isoToMs(seg.start);
+    const t1 = _isoToMs(seg.end);
+    const span = Math.max(1, t1 - t0);
+    const xPct = (ms) => Math.max(0, Math.min(100, (ms - t0) / span * 100)).toFixed(3) + '%';
+
+    // Row
+    const row = document.createElement('div');
+    row.className = 'tl-row';
+
+    // Label: date + time range
+    const label = document.createElement('div');
+    label.className = 'tl-label';
+    label.textContent = _fmtDate(seg.start) + ' ' + _fmtTime(seg.start) + '–' + _fmtTime(seg.end);
+    row.appendChild(label);
+
+    // Bar
+    const bar = document.createElement('div');
+    bar.className = 'tl-bar';
+    bar.dataset.segStart = seg.start;
+    bar.dataset.segEnd   = seg.end;
+
+    // Pre-existing covered segments
+    for (const cov of (seg.covered || [])) {
+      const el = document.createElement('div');
+      el.className = 'tl-segment tl-covered';
+      const x0 = xPct(_isoToMs(cov.start));
+      const w  = ((_isoToMs(cov.end) - _isoToMs(cov.start)) / span * 100).toFixed(3) + '%';
+      el.style.left = x0; el.style.width = w;
+      bar.appendChild(el);
+    }
+
+    // Session overlay placeholder (positioned dynamically by updateTimelineCursor)
+    const sessEl = document.createElement('div');
+    sessEl.className = 'tl-segment tl-session';
+    sessEl.id = `tl-session-${i}`;
+    sessEl.style.display = 'none';
+    bar.appendChild(sessEl);
+
+    // Cursor placeholder
+    const cursEl = document.createElement('div');
+    cursEl.className = 'tl-cursor';
+    cursEl.id = `tl-cursor-${i}`;
+    bar.appendChild(cursEl);
+
+    // Mouse events
+    bar.addEventListener('mousemove', (e) => {
+      const rect = bar.getBoundingClientRect();
+      const frac = (e.clientX - rect.left) / rect.width;
+      const ms = t0 + frac * span;
+      tlTooltip.style.display = 'block';
+      tlTooltip.style.left = (e.clientX + 12) + 'px';
+      tlTooltip.style.top  = (e.clientY - 8) + 'px';
+      tlTooltip.textContent = _fmtDatetime(ms);
+    });
+    bar.addEventListener('mouseleave', () => { tlTooltip.style.display = 'none'; });
+    bar.addEventListener('click', (e) => {
+      const rect = bar.getBoundingClientRect();
+      const frac = (e.clientX - rect.left) / rect.width;
+      const targetMs = t0 + frac * span;
+      doJump(new Date(targetMs).toISOString(), /*refetchCoverage=*/true);
+    });
+
+    row.appendChild(bar);
+    container.appendChild(row);
+
+    // Gap divider between segments
+    if (i < segs.length - 1) {
+      const gapMs = _isoToMs(segs[i + 1].start) - t1;
+      const div = document.createElement('div');
+      div.className = 'tl-divider';
+      div.textContent = '⋯ ' + _fmtDuration(gapMs) + ' ⋯';
+      container.appendChild(div);
+    }
+  });
+
+  // Apply current cursor/session positions immediately.
+  updateTimelineCursor();
+}
+
+/** Update cursor and session overlay positions without rebuilding the DOM. */
+function updateTimelineCursor() {
+  if (!coverageData?.segments) return;
+
+  coverageData.segments.forEach((seg, i) => {
+    const t0 = _isoToMs(seg.start);
+    const t1 = _isoToMs(seg.end);
+    const span = Math.max(1, t1 - t0);
+    const xPct = (ms) => Math.max(0, Math.min(100, (ms - t0) / span * 100)).toFixed(3) + '%';
+
+    const cursEl = document.getElementById(`tl-cursor-${i}`);
+    if (cursEl && serverState?.timestamp) {
+      const curMs = _isoToMs(serverState.timestamp);
+      if (curMs >= t0 && curMs <= t1) {
+        cursEl.style.display = 'block';
+        cursEl.style.left = xPct(curMs);
+      } else {
+        cursEl.style.display = 'none';
+      }
+    }
+
+    const sessEl = document.getElementById(`tl-session-${i}`);
+    if (sessEl && serverState?.session_start && serverState?.timestamp) {
+      const ssMs = _isoToMs(serverState.session_start);
+      const stMs = _isoToMs(serverState.timestamp);
+      if (ssMs >= t0 && ssMs <= t1) {
+        const w = Math.max(0, (stMs - ssMs) / span * 100).toFixed(3) + '%';
+        sessEl.style.display = 'block';
+        sessEl.style.left  = xPct(ssMs);
+        sessEl.style.width = w;
+      } else {
+        sessEl.style.display = 'none';
+      }
+    }
+  });
+}
+
+async function fetchCoverage() {
+  try {
+    const res = await fetch('/api/coverage');
+    coverageData = await res.json();
+    buildTimeline();
+  } catch (e) {
+    console.warn('fetchCoverage failed', e);
+  }
+}
+
+// ─── Gap navigation ───────────────────────────────────────────────────────────
+function allGaps() {
+  return (coverageData?.segments || []).flatMap(seg => seg.gaps || []);
+}
+
+async function jumpToGap(direction) {
+  if (!coverageData) await fetchCoverage();
+  const gaps = allGaps();
+  if (!gaps.length) return;
+
+  const curMs = serverState?.timestamp ? _isoToMs(serverState.timestamp) : null;
+  let targetGap;
+  if (direction > 0) {
+    targetGap = gaps.find(g => !curMs || _isoToMs(g.start) > curMs);
+    if (!targetGap) targetGap = gaps[0];
+  } else {
+    const before = gaps.filter(g => !curMs || _isoToMs(g.end) < curMs);
+    targetGap = before[before.length - 1];
+    if (!targetGap) targetGap = gaps[gaps.length - 1];
+  }
+  if (targetGap) await doJump(targetGap.start, /*refetchCoverage=*/true);
+}
+
+// ─── Calendar widget ─────────────────────────────────────────────────────────
+function _toDatetimeLocal(isoStr) {
+  // Returns "YYYY-MM-DDTHH:MM" in local time for datetime-local input.
+  const d = new Date(isoStr);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function syncCalendarToFrame() {
+  if (!serverState?.timestamp) return;
+  document.getElementById('jump-datetime').value = _toDatetimeLocal(serverState.timestamp);
+}
+
+async function jumpToDatetime() {
+  const val = document.getElementById('jump-datetime').value;
+  if (!val) return;
+  await doJump(new Date(val).toISOString(), /*refetchCoverage=*/true);
+}
+
+document.getElementById('jump-datetime').addEventListener('keydown', e => {
+  if (e.key === 'Enter') jumpToDatetime();
+});
+
+// ─── Jump helper ─────────────────────────────────────────────────────────────
+async function doJump(targetTs, refetchCoverage) {
+  stopLoop();
+  const res = await fetch('/api/jump', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_ts: targetTs })
+  });
+  const state = await res.json();
+  if (refetchCoverage) await fetchCoverage();
+  await applyState(state);
+}
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -331,22 +674,15 @@ slider.addEventListener('input', () => {
 
 function updateProcTimeDisplay(procMs) {
   lastProcMs = procMs;
-  if (procMs == null) {
-    frameTimeEl.textContent = '';
-    frameTimeEl.className = '';
-    return;
-  }
+  if (procMs == null) { frameTimeEl.textContent = ''; frameTimeEl.className = ''; return; }
   const atLimit = advanceDelayMs < procMs;
-  frameTimeEl.textContent = atLimit
-    ? `⚡ proc: ~${Math.round(procMs)}ms`
-    : `proc: ~${Math.round(procMs)}ms`;
+  frameTimeEl.textContent = atLimit ? `⚡ proc: ~${Math.round(procMs)}ms` : `proc: ~${Math.round(procMs)}ms`;
   frameTimeEl.className = atLimit ? 'at-limit' : 'ok';
   frameTimeEl.title = atLimit
     ? `Processing takes ~${Math.round(procMs)}ms — delay has no effect until it exceeds this.`
     : `Processing takes ~${Math.round(procMs)}ms. You could lower delay further.`;
 }
 
-// Keyboard ± speed adjustment
 const DELAY_STEPS = [0, 25, 50, 100, 150, 200, 300, 500, 750, 1000];
 function adjustDelay(direction) {
   const cur = parseInt(slider.value, 10);
@@ -367,7 +703,6 @@ function stopLoop() {
 async function runLoop() {
   loopRunning = true;
   while (loopRunning) {
-    // User-configured pause before advancing — show progress bar during this window.
     if (advanceDelayMs > 0) {
       const bar = document.getElementById('autoadvance-bar');
       const fill = document.getElementById('autoadvance-fill');
@@ -385,29 +720,19 @@ async function runLoop() {
     }
     if (!loopRunning) break;
 
-    // Navigate to the next frame.
     navigateCalledAt = performance.now();
     let state;
-    try {
-      state = await navigate('next');
-    } catch (e) {
-      console.error('navigate failed', e);
-      stopLoop();
-      break;
-    }
+    try { state = await navigate('next'); }
+    catch (e) { console.error('navigate failed', e); stopLoop(); break; }
     if (!loopRunning) break;
 
-    // Poll until the server is done loading (short fixed interval, not slider-controlled).
     while (state.loading && loopRunning) {
       await sleep(50);
-      try { state = await fetchState(); } catch (e) { /* retry next tick */ }
+      try { state = await fetchState(); } catch (e) { /* retry */ }
     }
     if (!loopRunning) break;
 
-    // Apply UI for this frame.
     await updateUI(state);
-
-    // Stop if no more frames or user must intervene.
     if (state.done || state.needs_pause) { stopLoop(); break; }
   }
 }
@@ -416,7 +741,6 @@ async function runLoop() {
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(img, 0, 0);
-
   localBoxes.forEach((box, i) => {
     const isActive = i === activeIdx;
     ctx.strokeStyle = isActive ? COLOR_ACTIVE : (box.label !== null ? COLOR_LABELED : COLOR_UNLABELED);
@@ -429,7 +753,6 @@ function redraw() {
       ctx.fillText(`[${box.label}] ${name}`, box.x + 4, box.y + 16);
     }
   });
-
   document.getElementById('box-count').textContent =
     `${localBoxes.length} box${localBoxes.length !== 1 ? 'es' : ''}`;
 }
@@ -480,12 +803,14 @@ async function updateUI(state) {
 
   document.getElementById('done-overlay').classList.toggle('visible', state.done && !state.loading);
 
+  // Update timeline cursor and session bar (no coverage refetch).
+  updateTimelineCursor();
+  // Keep calendar input in sync with current frame.
+  syncCalendarToFrame();
+
   if (!state.loading) {
-    // Reinitialise localBoxes only when the displayed frame changes.
     if (state.key !== prevKey) {
-      const source = state.existing_annotations?.length > 0
-        ? state.existing_annotations
-        : state.blobs;
+      const source = state.existing_annotations?.length > 0 ? state.existing_annotations : state.blobs;
       localBoxes = (source ?? []).map(b => ({
         x: b.bbox[0], y: b.bbox[1], w: b.bbox[2], h: b.bbox[3],
         label: b.label ?? null
@@ -498,7 +823,6 @@ async function updateUI(state) {
 
 async function applyState(state) {
   stopLoop();
-  // Poll until loaded (handles user-triggered navigation landing on a loading frame).
   while (state.loading) {
     await sleep(50);
     try { state = await fetchState(); } catch (e) { /* retry */ }
@@ -558,9 +882,8 @@ function clientToImage(cx, cy) {
 
 function boxDistance(box, mx, my) {
   const { x, y, w, h } = box;
-  if (mx >= x && mx <= x+w && my >= y && my <= y+h) {
+  if (mx >= x && mx <= x+w && my >= y && my <= y+h)
     return Math.min(mx-x, x+w-mx, my-y, y+h-my);
-  }
   const cx = Math.max(x, Math.min(mx, x+w));
   const cy = Math.max(y, Math.min(my, y+h));
   return Math.hypot(mx-cx, my-cy);
@@ -624,7 +947,6 @@ document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT') return;
 
   stopLoop();
-
   const key = e.key;
 
   if (key >= '0' && key <= '9') {
@@ -637,13 +959,11 @@ document.addEventListener('keydown', e => {
     } else {
       openModal(labelId, () => { localBoxes[activeIdx].label = labelId; redraw(); });
     }
-
   } else if (key === 'Tab') {
     e.preventDefault();
     if (localBoxes.length === 0) return;
     activeIdx = activeIdx < 0 ? 0 : (activeIdx + 1) % localBoxes.length;
     redraw();
-
   } else if (key === 'Delete' || key === 'Backspace') {
     e.preventDefault();
     if (activeIdx >= 0) {
@@ -651,32 +971,23 @@ document.addEventListener('keydown', e => {
       activeIdx = localBoxes.length > 0 ? Math.min(activeIdx, localBoxes.length - 1) : -1;
       redraw();
     }
-
   } else if (key === ',') {
     e.preventDefault(); userNavigate('prev');
-
   } else if (key === '.' || key === 'Enter') {
     e.preventDefault(); userNavigate('next');
-
   } else if (key === ' ') {
     e.preventDefault(); userNavigate('resume');
-
   } else if (key === 'Escape') {
     e.preventDefault(); confirmQuit();
-
   } else if (key === 's' || key === 'S') {
     e.preventDefault(); userNavigate('toggle_skip');
-
   } else if (key === '+' || key === '=') {
-    e.preventDefault(); adjustDelay(-1);  // faster
-
+    e.preventDefault(); adjustDelay(-1);
   } else if (key === '-') {
-    e.preventDefault(); adjustDelay(+1);  // slower
-
+    e.preventDefault(); adjustDelay(+1);
   } else if (key === 'c' || key === 'C') {
     e.preventDefault();
     bboxClipboard = localBoxes.map(b => ({ ...b }));
-
   } else if (key === 'v' || key === 'V') {
     e.preventDefault();
     if (bboxClipboard !== null) {
@@ -684,6 +995,10 @@ document.addEventListener('keydown', e => {
       activeIdx = localBoxes.length > 0 ? 0 : -1;
       redraw();
     }
+  } else if (key === '[') {
+    e.preventDefault(); jumpToGap(-1);
+  } else if (key === ']') {
+    e.preventDefault(); jumpToGap(1);
   }
 });
 
@@ -727,6 +1042,7 @@ document.getElementById('modal-input').addEventListener('keydown', e => {
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 (async () => {
+  await fetchCoverage();   // builds timeline before first frame arrives
   let state;
   try { state = await fetchState(); } catch (e) { return; }
   while (state.loading) {

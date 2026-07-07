@@ -149,6 +149,16 @@ class TimestampAwareBackgroundSubtractor(object):
                 case "target_size":
                     self.target_size = tuple(map(int, v))
 
+    def reset(self):
+        """Discard all accumulated background history and reset fps tracking."""
+        self.fps = self.default_fps
+        self.last_timestamp = 0.0
+        self.model = cv.createBackgroundSubtractorMOG2(
+            history=int(self.history_seconds * self.fps),
+            varThreshold=self.var_threshold,
+            detectShadows=self.detect_shadows,
+        )
+
     def update_fps(self, delta_t: float, ema_alpha: float = 0.1):
         # Exponential moving average, or reset to default if delta_t is very large
         if self.fps is None or delta_t > self.history_seconds / 2:

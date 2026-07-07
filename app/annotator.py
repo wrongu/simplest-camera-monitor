@@ -1,4 +1,5 @@
 import argparse
+import bisect
 import json
 import os
 import signal
@@ -115,6 +116,8 @@ class FrameState:
     skipping: bool
     needs_pause: bool  # False → frontend should auto-advance after its configured delay
     done: bool
+    timestamp: Optional[str]     # ISO datetime of current frame, for timeline cursor
+    session_start: Optional[str]  # ISO datetime of active annotation file's start
 
     def to_dict(self) -> dict:
         return {
@@ -128,6 +131,8 @@ class FrameState:
             "skipping": self.skipping,
             "needs_pause": self.needs_pause,
             "done": self.done,
+            "timestamp": self.timestamp,
+            "session_start": self.session_start,
         }
 
 
@@ -159,6 +164,66 @@ def _iou(b1: LabeledBox, b2: LabeledBox) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _key_to_dt(key: str) -> datetime:
+    return datetime.strptime(key.replace("\\", "/"), "%Y/%m/%d/%H%M%S.jpg")
+
+
+def _ts_to_dt(ts: float) -> datetime:
+    return datetime.fromtimestamp(ts)
+
+
+def load_all_annotation_files(image_dir: Path) -> list[tuple[AnnotationFile, Path]]:
+    """Load all annotation JSON files in image_dir, sorted by filename."""
+    result = []
+    for p in sorted(image_dir.glob("annotations.*.json")):
+        af = AnnotationFile.load(p)
+        result.append((af, p))
+    return result
+
+
+def compute_covered_interval(annot_files: list) -> portion.Interval:
+    """Union of all annotation file intervals (with fudge for ±30s boundary slop)."""
+    iv = portion.empty()
+    for af, _ in annot_files:
+        seg = af.get_interval(fudge=True)
+        if seg is not None:
+            iv |= seg
+    return iv
+
+
+def _interval_to_json(iv: portion.Interval) -> list[dict]:
+    result = []
+    for atom in iv:
+        if not atom.empty and isinstance(atom.lower, datetime) and isinstance(atom.upper, datetime):
+            result.append({"start": atom.lower.isoformat(), "end": atom.upper.isoformat()})
+    return result
+
+
+# Large time gaps between images that indicate a recording break rather than idle time.
+_SEGMENT_GAP_SECONDS = 3 * 3600  # 3 hours
+
+
+def _compute_segments(
+    all_files: list, gap_threshold: float = _SEGMENT_GAP_SECONDS
+) -> list[tuple[float, float]]:
+    """
+    Split image files into contiguous time clusters separated by gaps >= gap_threshold.
+    Returns a list of (start_epoch, end_epoch) tuples.
+    """
+    if not all_files:
+        return []
+    clusters = []
+    seg_start = all_files[0][0]
+    prev_ts = seg_start
+    for ts, _ in all_files[1:]:
+        if ts - prev_ts >= gap_threshold:
+            clusters.append((seg_start, prev_ts))
+            seg_start = ts
+        prev_ts = ts
+    clusters.append((seg_start, prev_ts))
+    return clusters
+
+
 # ─── Annotator state ──────────────────────────────────────────────────────────
 
 
@@ -177,39 +242,46 @@ class AnnotatorState:
         paused: bool,
         start_key: Optional[str],
         end_key: Optional[str],
+        existing_annot_files: list,   # list[tuple[AnnotationFile, Path]]
+        covered: portion.Interval,
     ):
         self.lock = threading.Lock()
 
-        annot_uid = int(time.time())
-
         self.image_dir = image_dir
-        self.annot_file = image_dir / f"annotations.{annot_uid}.json"
         self.bg_model = bg_model
-
-        self.annot = AnnotationFile(labels=labels_dict, start=start_key)
-
-        # Full sorted file list. Stored so we can index into it for prefetching.
-        self._all_files: list = list(get_all_timestamped_files_sorted(image_dir))
-        self._total_files: int = len(self._all_files)
+        self._labels_dict: dict[str, str] = dict(labels_dict)
         self._end_key = end_key
 
-        # Index into _all_files; the next file to process.
-        self._iter_idx: int = self._find_resume_idx(start_key)
+        # Pre-existing annotation coverage (read-only during session).
+        self._covered: portion.Interval = covered
 
-        # file_index counts how many files from _all_files have been visited.
-        # Initialised to the resume offset so progress is correct on resume.
+        # Merged image annotations from all existing files, for display when browsing.
+        self._all_annot_images: dict[str, list[LabeledBox]] = {}
+        for af, _ in existing_annot_files:
+            self._all_annot_images.update(af.images)
+
+        # Full sorted file list.
+        self._all_files: list = list(get_all_timestamped_files_sorted(image_dir))
+        self._total_files: int = len(self._all_files)
+
+        # Reverse lookup: image key → index in _all_files.
+        self._key_to_idx: dict = {
+            str(fn.relative_to(self.image_dir)): i for i, (_, fn) in enumerate(self._all_files)
+        }
+
+        # Index into _all_files; the next file to process.
+        self._iter_idx: int = self._find_start_idx(start_key)
         self._file_index: int = self._iter_idx
 
         # Files just before the resume point that may be needed for bg model warm-up.
         self._recent_skipped: deque = deque()
         self._populate_recent_skipped_for_warmup()
 
-        # Reverse lookup: image key → index in _all_files. Used for backward navigation past the resume point.
-        self._key_to_idx: dict = {
-            str(fn.relative_to(self.image_dir)): i for i, (_, fn) in enumerate(self._all_files)
-        }
+        # Active annotation file for this session (created on first unannotated frame).
+        self._active_annot: Optional[AnnotationFile] = None
+        self._active_annot_path: Optional[Path] = None
 
-        # Prefetch cache: str(filename) → tuple[bytes (raw JPEG), cv.Mat (loaded img)] or _PREFETCH_PENDING.
+        # Prefetch cache: str(filename) → tuple[bytes, cv.Mat] or _PREFETCH_PENDING.
         self._prefetch_cache: dict = {}
 
         self.history_left: deque = deque(maxlen=200)
@@ -217,7 +289,7 @@ class AnnotatorState:
 
         self.current_key: Optional[str] = None
         self.current_img_bytes: Optional[bytes] = None
-        self.current_bboxes: list = []  # list[LabeledBox]
+        self.current_bboxes: list = []
         self.current_needs_pause: bool = True
 
         self._loading: bool = False
@@ -228,29 +300,35 @@ class AnnotatorState:
 
     # ── Resume helpers ────────────────────────────────────────────────────────
 
-    def _find_resume_idx(self, start_key: Optional[str] = None) -> int:
-        """Return the index of the first file at or after the `through` key."""
-        through = start_key if start_key is not None else self.annot.through
-        if through is None:
-            return 0
-        for i, (ts, fn) in enumerate(self._all_files):
-            if str(fn.relative_to(self.image_dir)) >= through:
+    def _find_start_idx(self, start_key: Optional[str] = None) -> int:
+        """Find the index of the first unannotated file, optionally after start_key."""
+        begin = 0
+        if start_key is not None:
+            for i, (ts, fn) in enumerate(self._all_files):
+                if str(fn.relative_to(self.image_dir)) >= start_key:
+                    begin = i
+                    break
+            else:
+                return len(self._all_files)
+
+        for i in range(begin, len(self._all_files)):
+            ts, fn = self._all_files[i]
+            if _ts_to_dt(ts) not in self._covered:
                 return i
-        return len(self._all_files)  # through is past all files
+        return len(self._all_files)
 
     def _populate_recent_skipped_for_warmup(self):
         """
         Pre-populate _recent_skipped with files just before the resume point so
         the background model can be warmed up when processing the first new frame.
         """
-        if self._iter_idx == 0 or self.annot.through is None:
+        if self._iter_idx == 0:
             return
         if self._iter_idx >= len(self._all_files):
             resume_ts = self._all_files[-1][0]
         else:
             resume_ts = self._all_files[self._iter_idx][0]
         lookback_ts = resume_ts - 2 * self.bg_model.history_seconds
-        # Scan backwards to find how far to look, then append in forward (chronological) order.
         start_i = 0
         for i in range(self._iter_idx - 1, -1, -1):
             if self._all_files[i][0] < lookback_ts:
@@ -258,6 +336,21 @@ class AnnotatorState:
                 break
         for i in range(start_i, self._iter_idx):
             self._recent_skipped.append(self._all_files[i])
+
+    # ── Annotation file lifecycle ─────────────────────────────────────────────
+
+    def _ensure_active_annot(self, start_key: str):
+        """Create a new active annotation file if none exists for this gap."""
+        if self._active_annot is not None:
+            return
+        annot_uid = int(time.time())
+        self._active_annot_path = self.image_dir / f"annotations.{annot_uid}.json"
+        self._active_annot = AnnotationFile(labels=dict(self._labels_dict), start=start_key)
+
+    def _save_active_annot(self, through_key: Optional[str] = None):
+        """Persist the active annotation file. No-op if none is active."""
+        if self._active_annot is not None and self._active_annot_path is not None:
+            self._active_annot.save(self._active_annot_path, through_key=through_key)
 
     # ── Prefetching ───────────────────────────────────────────────────────────
 
@@ -275,7 +368,6 @@ class AnnotatorState:
         Launch background disk reads for the next PREFETCH_AHEAD unannotated files.
         Also evicts cache entries that are no longer needed (already processed).
         """
-        # Evict stale entries: keep only files from the current iterator position forward.
         upcoming = {
             str(fn)
             for _, fn in self._all_files[self._iter_idx : self._iter_idx + self.PREFETCH_AHEAD * 2]
@@ -284,15 +376,15 @@ class AnnotatorState:
         for k in stale:
             del self._prefetch_cache[k]
 
-        # Launch prefetch threads for the next few unannotated files.
         idx = self._iter_idx
         launched = 0
         while idx < len(self._all_files) and launched < self.PREFETCH_AHEAD:
             ts, fn = self._all_files[idx]
             idx += 1
             key = str(fn.relative_to(self.image_dir))
-            if key in self.annot.images:
-                continue  # skip already-annotated files
+            active_images = self._active_annot.images if self._active_annot else {}
+            if _ts_to_dt(ts) in self._covered or key in active_images:
+                continue
             fn_str = str(fn)
             if fn_str not in self._prefetch_cache:
                 self._prefetch_cache[fn_str] = _PREFETCH_PENDING
@@ -306,19 +398,13 @@ class AnnotatorState:
         Run the background model on one image.
 
         Returns (raw_jpeg_bytes, list[LabeledBox]).
-
-        The raw JPEG bytes come directly from disk (no re-encoding), which avoids
-        a costly cv.imencode call and serves the browser the original image quality.
-        A prefetch cache is checked first so disk I/O overlaps with display time.
         """
         fn_str = str(filename)
         cached = self._prefetch_cache.pop(fn_str, None)
         if isinstance(cached, tuple):
             byt, img = cached
         else:
-            # Either not prefetched yet, or prefetch thread still running — read directly.
             byt = filename.read_bytes()
-            # Decode to BGR array for the background model.
             img = cv.imdecode(np.frombuffer(byt, dtype=np.uint8), cv.IMREAD_COLOR)
 
         _, blobs = self.bg_model.applyWithStats(img, timestamp)
@@ -345,13 +431,9 @@ class AnnotatorState:
         Advance through the file list to the next frame to display.
 
         May be called on a background thread (for subsequent frames) or the main
-        thread (for the initial frame). All new (unannotated) frames are returned —
-        no-motion frames in skip mode are marked needs_pause=False so the browser
-        auto-advances them, but they are still visible so the user can spot false
-        negatives from the background model.
+        thread (for the initial frame). Files already covered by existing annotation
+        intervals are skipped transparently, keeping the bg model warmed up.
         """
-        # Push the current frame to history BEFORE iterating so that `,` returns
-        # frames in strict chronological order.
         with self.lock:
             if self.current_key is not None:
                 self.history_left.append(
@@ -361,14 +443,18 @@ class AnnotatorState:
         while self._iter_idx < len(self._all_files):
             timestamp, filename = self._all_files[self._iter_idx]
             self._iter_idx += 1
-            self._file_index = self._iter_idx  # progress tracks all files visited
+            self._file_index = self._iter_idx
 
             key = str(filename.relative_to(self.image_dir))
 
             if self._end_key is not None and key > self._end_key:
                 break
-            elif key in self.annot.images:
-                # Already annotated: add to burn-through queue and move on.
+
+            ts_dt = _ts_to_dt(timestamp)
+            active_images = self._active_annot.images if self._active_annot else {}
+
+            # Skip files covered by pre-existing annotations or already annotated this session.
+            if ts_dt in self._covered or key in active_images:
                 self._recent_skipped.append((timestamp, filename))
                 continue
 
@@ -376,7 +462,6 @@ class AnnotatorState:
             while self._recent_skipped:
                 ts, fn = self._recent_skipped.popleft()
                 if ts >= timestamp - 2 * self.bg_model.history_seconds:
-                    # Try cache first to avoid a redundant disk read.
                     cached = self._prefetch_cache.pop(str(fn), None)
                     if isinstance(cached, tuple):
                         _, img = cached
@@ -384,16 +469,16 @@ class AnnotatorState:
                         img = cv.imread(str(fn))
                     self.bg_model.applyWithStats(img, ts)
 
+            # Ensure we have an active annotation file for this unannotated gap.
+            self._ensure_active_annot(key)
+
             self._images_processed += 1
             if self._images_processed % 100 == 0:
                 with self.lock:
-                    self.annot.save(self.annot_file, through_key=key)
+                    self._save_active_annot(through_key=key)
 
             img_bytes, bboxes = self._process_image(timestamp, filename)
-
             needs_pause = bool(bboxes) or not self._skipping
-
-            # Kick off prefetch for upcoming files while the bg thread is still running.
             self._kickoff_prefetch()
 
             with self.lock:
@@ -427,9 +512,6 @@ class AnnotatorState:
                 key, img_bytes, bboxes = self.history_left.pop()
                 self._load_frame(key, img_bytes, bboxes, needs_pause=True)
             elif self.current_key is not None:
-                # history_left is exhausted — navigate further back into already-processed
-                # frames by reading directly from disk. Annotations are already in
-                # annot.images and will be surfaced via existing_annotations in get_state().
                 cur_idx = self._key_to_idx.get(self.current_key, -1)
                 if cur_idx > 0:
                     _, filename = self._all_files[cur_idx - 1]
@@ -454,7 +536,6 @@ class AnnotatorState:
                 self._start_load_next()
 
         elif action == "resume":
-            # Drain history_right to reach the most recently-seen frame, then advance.
             while self.history_right:
                 self.history_left.append(
                     (self.current_key, self.current_img_bytes, self.current_bboxes)
@@ -465,42 +546,100 @@ class AnnotatorState:
 
         elif action == "toggle_skip":
             self._skipping = not self._skipping
-            # Recompute needs_pause for the current frame immediately so the frontend
-            # responds without waiting for the next navigation action.
             self.current_needs_pause = bool(self.current_bboxes) or not self._skipping
 
         elif action == "quit":
-            self.annot.save(self.annot_file, through_key=self.current_key)
+            self._save_active_annot(through_key=self.current_key)
             self._done = True
             threading.Thread(
                 target=lambda: os.kill(os.getpid(), signal.CTRL_C_EVENT), daemon=True
             ).start()
 
+    def jump_to(self, target_key: str):
+        """
+        Jump to a specific image key, starting a new annotation file for that gap.
+        Must be called under self.lock.
+        """
+        # Save the current annotation file before leaving this gap.
+        self._save_active_annot(through_key=self.current_key)
+
+        # Find the index of the target key.
+        target_idx = len(self._all_files)
+        for i, (ts, fn) in enumerate(self._all_files):
+            if str(fn.relative_to(self.image_dir)) >= target_key:
+                target_idx = i
+                break
+
+        self._iter_idx = target_idx
+        self._file_index = target_idx
+
+        # Clear history and current frame.
+        self.history_left.clear()
+        self.history_right.clear()
+        self.current_key = None
+        self.current_img_bytes = None
+        self.current_bboxes = []
+        self._done = False
+
+        # Start fresh annotation file for this gap (created lazily on first frame).
+        self._active_annot = None
+        self._active_annot_path = None
+
+        # Reset bg model so old history doesn't bleed into the new time window,
+        # then re-populate warmup frames from just before the new position.
+        self.bg_model.reset()
+        self._recent_skipped = deque()
+        self._populate_recent_skipped_for_warmup()
+
     # ── State snapshot ────────────────────────────────────────────────────────
 
     def get_state(self) -> FrameState:
         """Return a serialisable snapshot of the current state. Call under self.lock."""
-        existing = self.annot.images.get(self.current_key, [])
+        active_images = self._active_annot.images if self._active_annot else {}
+        # Prefer annotation from the active session; fall back to pre-existing.
+        existing = active_images.get(self.current_key) or self._all_annot_images.get(self.current_key, [])
+        labels = self._active_annot.labels if self._active_annot else self._labels_dict
+
+        ts_str = None
+        if self.current_key:
+            try:
+                ts_str = _key_to_dt(self.current_key).isoformat()
+            except Exception:
+                pass
+
+        session_start_str = None
+        if self._active_annot and self._active_annot.start:
+            try:
+                session_start_str = _key_to_dt(self._active_annot.start).isoformat()
+            except Exception:
+                pass
+
         return FrameState(
             key=self.current_key,
             file_index=self._file_index,
             total=self._total_files,
             blobs=self.current_bboxes,
             existing_annotations=existing,
-            labels=self.annot.labels,
+            labels=labels,
             loading=self._loading,
             skipping=self._skipping,
             needs_pause=self.current_needs_pause,
             done=self._done,
+            timestamp=ts_str,
+            session_start=session_start_str,
         )
 
     def save_bboxes(self, key: str, bboxes: list):
         """Persist submitted bboxes for the given key. Call under self.lock."""
+        if self._active_annot is None:
+            return
         labeled = [b for b in bboxes if b.label is not None]
         if labeled:
-            self.annot.images[key] = labeled
-        elif key in self.annot.images:
-            del self.annot.images[key]
+            self._active_annot.images[key] = labeled
+            self._all_annot_images[key] = labeled
+        else:
+            self._active_annot.images.pop(key, None)
+            self._all_annot_images.pop(key, None)
 
 
 # ─── Flask app ────────────────────────────────────────────────────────────────
@@ -544,15 +683,78 @@ def create_app(state: AnnotatorState) -> Flask:
         label_id = str(data["id"])
         name = str(data["name"]).strip()
         with state.lock:
-            state.annot.labels[label_id] = name
-            state.annot.save(state.annot_file, through_key=state.current_key)
-            return jsonify({"labels": state.annot.labels})
+            state._labels_dict[label_id] = name
+            if state._active_annot is not None:
+                state._active_annot.labels[label_id] = name
+                state._save_active_annot(through_key=state.current_key)
+            return jsonify({"labels": state._labels_dict})
 
     @app.route("/api/quit", methods=["POST"])
     def api_quit():
         with state.lock:
             state.advance("quit")
         return jsonify({"status": "shutting_down"})
+
+    @app.route("/api/coverage")
+    def api_coverage():
+        with state.lock:
+            if not state._all_files:
+                return jsonify({"segments": []})
+
+            all_ts = [ts for ts, _ in state._all_files]
+            clusters = _compute_segments(state._all_files)
+
+            result_segments = []
+            for seg_start_ep, seg_end_ep in clusters:
+                seg_start_dt = _ts_to_dt(seg_start_ep)
+                seg_end_dt = _ts_to_dt(seg_end_ep)
+                seg_range = portion.closed(seg_start_dt, seg_end_dt)
+
+                covered_in_seg = state._covered & seg_range
+                uncovered_in_seg = seg_range - state._covered
+
+                gaps = []
+                for atom in uncovered_in_seg:
+                    if atom.empty or not isinstance(atom.lower, datetime):
+                        continue
+                    lo, hi = atom.lower, atom.upper
+                    i_lo = bisect.bisect_left(all_ts, lo.timestamp())
+                    i_hi = bisect.bisect_right(all_ts, hi.timestamp())
+                    gaps.append({
+                        "start": lo.isoformat(),
+                        "end": hi.isoformat(),
+                        "file_count": i_hi - i_lo,
+                    })
+
+                result_segments.append({
+                    "start": seg_start_dt.isoformat(),
+                    "end": seg_end_dt.isoformat(),
+                    "covered": _interval_to_json(covered_in_seg),
+                    "gaps": gaps,
+                })
+
+            return jsonify({"segments": result_segments})
+
+    @app.route("/api/jump", methods=["POST"])
+    def api_jump():
+        data = request.get_json()
+        target_key = data.get("target_key")
+        target_ts_str = data.get("target_ts")  # ISO datetime string
+
+        with state.lock:
+            if not target_key and target_ts_str:
+                target_dt = datetime.fromisoformat(target_ts_str)
+                target_epoch = target_dt.timestamp()
+                for ts, fn in state._all_files:
+                    if ts >= target_epoch:
+                        target_key = str(fn.relative_to(state.image_dir))
+                        break
+
+            if target_key:
+                state.jump_to(target_key)
+                state._start_load_next()
+
+            return jsonify(state.get_state().to_dict())
 
     return app
 
@@ -571,11 +773,6 @@ def get_parser():
         "--paused",
         action="store_true",
         help="Start with skip mode off, pausing on every frame regardless of motion.",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Find latest annotations file and pick up where that one left off.",
     )
     parser.add_argument(
         "--interval",
@@ -598,8 +795,26 @@ def run_app(
 ):
     if labels_dict is None:
         labels_dict = {}
+
+    existing_annot_files = load_all_annotation_files(image_dir)
+    covered = compute_covered_interval(existing_annot_files)
+
+    # Merge labels from all existing annotation files, with later files winning.
+    merged_labels = {}
+    for af, _ in existing_annot_files:
+        merged_labels.update(af.labels)
+    merged_labels.update(labels_dict)  # caller-supplied labels take precedence
+
     state = AnnotatorState(
-        image_dir, bg_model, labels_dict, skip_no_motion, paused, start_key, end_key
+        image_dir=image_dir,
+        bg_model=bg_model,
+        labels_dict=merged_labels,
+        skip_no_motion=skip_no_motion,
+        paused=paused,
+        start_key=start_key,
+        end_key=end_key,
+        existing_annot_files=existing_annot_files,
+        covered=covered,
     )
 
     # Load the first frame synchronously before starting the server.
@@ -620,8 +835,9 @@ def run_app(
         pass
     finally:
         with state.lock:
-            state.annot.save(state.annot_file, through_key=state.current_key)
-        print(f"Annotations saved to {state.annot_file}")
+            state._save_active_annot(through_key=state.current_key)
+        if state._active_annot_path:
+            print(f"Annotations saved to {state._active_annot_path}")
 
 
 def main(args):
@@ -641,26 +857,14 @@ def main(args):
     bg_model = TimestampAwareBackgroundSubtractor(**bg_config)
 
     start_key = None
-    labels_dict = {}
-    if args.resume:
-        for exist_annot in Path(image_dir).glob("*.json"):
-            with open(exist_annot, "r") as f:
-                annot = json.load(f)
-            if "through" in annot and (latest is None or annot["through"] > latest):
-                latest = annot["through"]
-                labels_dict = annot["labels"]
-        start_key = latest
-
     end_key = None
     if args.interval:
-        assert not args.resume
         assert len(args.interval) == 2
         start_key, end_key = args.interval
 
     run_app(
         image_dir=image_dir,
         bg_model=bg_model,
-        labels_dict=labels_dict,
         skip_no_motion=args.skip_no_motion,
         paused=args.paused,
         start_key=start_key,
