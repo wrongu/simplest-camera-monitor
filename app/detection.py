@@ -33,6 +33,12 @@ class DetectionModel(Protocol):
     def process_frame(self, frame: cv.Mat, timestamp: float) -> list[BoundingBox]: ...
 
 
+# Note on batching: one wonders if it might be faster to handle images from multiple cameras with a single 'batched'
+# inference pass rather than calling process_frame() serially for each camera. Batching might help for the YOLO
+# detection subclass, but for ONNX it requires a special model export flag. How to handle cases where the monitor calls
+# for batched inference when the model might or might not support it seems complicated and not worth it (for now).
+
+
 class BackgroundModelWithMorphologyClassifier(DetectionModel):
     def __init__(
         self,
