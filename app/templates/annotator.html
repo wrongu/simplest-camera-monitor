@@ -60,6 +60,13 @@
   }
   .tl-covered  { background: #1a4a1a; }   /* pre-existing: dark green */
   .tl-session  { background: #2d7a2d; }   /* current session: lighter green */
+  .tl-other-only {
+    background: repeating-linear-gradient(
+      45deg,
+      #6a4a1a, #6a4a1a 4px,
+      #8a6a2a 4px, #8a6a2a 8px
+    );
+  }   /* annotated on other camera, not yet here: amber hatch */
   .tl-cursor {
     position: absolute;
     top: 0; height: 100%;
@@ -76,6 +83,22 @@
     padding: 1px 0 3px;
     user-select: none;
   }
+  #tl-legend {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: #999;
+    padding: 2px 0 4px;
+    user-select: none;
+  }
+  #tl-legend.visible { display: flex; }
+  #tl-legend .swatch {
+    display: inline-block;
+    width: 12px; height: 10px;
+    border-radius: 2px;
+  }
+
   /* tooltip */
   #tl-tooltip {
     display: none;
@@ -335,6 +358,11 @@
 </div>
 
 <div id="timeline-wrap">
+  <div id="tl-legend">
+    <span class="swatch" style="background:#1a4a1a"></span> annotated here
+    <span class="swatch" style="background:#2d7a2d"></span> this session
+    <span class="swatch tl-other-only"></span> labeled box seen on other camera, not yet here
+  </div>
   <div id="timeline-segments"></div>
 </div>
 <div id="tl-tooltip"></div>
@@ -493,6 +521,18 @@ function buildTimeline() {
     bar.dataset.segStart = seg.start;
     bar.dataset.segEnd   = seg.end;
 
+    // Annotated on the other camera, but not yet here (drawn first, so pre-existing
+    // coverage here paints over it — the two never actually overlap server-side).
+    for (const oo of (seg.other_only || [])) {
+      const el = document.createElement('div');
+      el.className = 'tl-segment tl-other-only';
+      const x0 = xPct(_isoToMs(oo.start));
+      const w  = ((_isoToMs(oo.end) - _isoToMs(oo.start)) / span * 100).toFixed(3) + '%';
+      el.style.left = x0; el.style.width = w;
+      el.title = 'Labeled box seen on other camera, not yet here';
+      bar.appendChild(el);
+    }
+
     // Pre-existing covered segments
     for (const cov of (seg.covered || [])) {
       const el = document.createElement('div');
@@ -592,6 +632,7 @@ async function fetchCoverage() {
   try {
     const res = await fetch('/api/coverage');
     coverageData = await res.json();
+    document.getElementById('tl-legend').classList.toggle('visible', !!coverageData.other_configured);
     buildTimeline();
   } catch (e) {
     console.warn('fetchCoverage failed', e);

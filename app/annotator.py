@@ -101,6 +101,30 @@ class AnnotationFile:
             upper=datetime.strptime(self.through.replace("\\", "/"), "%Y/%m/%d/%H%M%S.jpg") + delta,
         )
 
+    def get_interval_with_labels(
+        self, labels: Optional[list[str]] = None, fudge: bool = False
+    ) -> portion.Interval:
+        """
+        Union of intervals around each image that has at least one labeled box,
+        restricted to the given label *names* (matched via self.labels id→name).
+        If labels is None, any labeled box counts, regardless of class.
+        """
+        delta = timedelta(seconds=30) if fudge else timedelta(0)
+        label_ids = None
+        if labels is not None:
+            label_ids = {lid for lid, name in self.labels.items() if name in labels}
+
+        iv = portion.empty()
+        for key, boxes in self.images.items():
+            match = any(
+                b.label is not None and (label_ids is None or b.label in label_ids)
+                for b in boxes
+            )
+            if match:
+                dt = datetime.strptime(key.replace("\\", "/"), "%Y/%m/%d/%H%M%S.jpg")
+                iv |= portion.closed(dt - delta, dt + delta)
+        return iv
+
 
 @dataclass
 class FrameState:
@@ -191,6 +215,18 @@ def compute_covered_interval(annot_files: list) -> portion.Interval:
     return iv
 
 
+def compute_labeled_interval(annot_files: list, labels: Optional[list[str]]) -> portion.Interval:
+    """
+    Union, across all given annotation files, of intervals around images that actually
+    have a labeled box (optionally restricted to specific label names). With fudge for
+    ±30s boundary slop, same as compute_covered_interval.
+    """
+    iv = portion.empty()
+    for af, _ in annot_files:
+        iv |= af.get_interval_with_labels(labels, fudge=True)
+    return iv
+
+
 def _interval_to_json(iv: portion.Interval) -> list[dict]:
     result = []
     for atom in iv:
@@ -244,6 +280,7 @@ class AnnotatorState:
         end_key: Optional[str],
         existing_annot_files: list,   # list[tuple[AnnotationFile, Path]]
         covered: portion.Interval,
+        other_covered: Optional[portion.Interval] = None,
     ):
         self.lock = threading.Lock()
 
@@ -254,6 +291,13 @@ class AnnotatorState:
 
         # Pre-existing annotation coverage (read-only during session).
         self._covered: portion.Interval = covered
+
+        # Intervals where a labeled box actually appeared in another camera's
+        # annotations, for cross-referencing on the timeline (read-only during
+        # session). Empty if not configured.
+        self._other_covered: portion.Interval = (
+            other_covered if other_covered is not None else portion.empty()
+        )
 
         # Merged image annotations from all existing files, for display when browsing.
         self._all_annot_images: dict[str, list[LabeledBox]] = {}
@@ -699,10 +743,11 @@ def create_app(state: AnnotatorState) -> Flask:
     def api_coverage():
         with state.lock:
             if not state._all_files:
-                return jsonify({"segments": []})
+                return jsonify({"segments": [], "other_configured": False})
 
             all_ts = [ts for ts, _ in state._all_files]
             clusters = _compute_segments(state._all_files)
+            other_configured = not state._other_covered.empty
 
             result_segments = []
             for seg_start_ep, seg_end_ep in clusters:
@@ -712,6 +757,8 @@ def create_app(state: AnnotatorState) -> Flask:
 
                 covered_in_seg = state._covered & seg_range
                 uncovered_in_seg = seg_range - state._covered
+                # Annotated on the other camera, but not yet here — worth prioritizing.
+                other_only_in_seg = (state._other_covered & seg_range) - state._covered
 
                 gaps = []
                 for atom in uncovered_in_seg:
@@ -730,10 +777,11 @@ def create_app(state: AnnotatorState) -> Flask:
                     "start": seg_start_dt.isoformat(),
                     "end": seg_end_dt.isoformat(),
                     "covered": _interval_to_json(covered_in_seg),
+                    "other_only": _interval_to_json(other_only_in_seg),
                     "gaps": gaps,
                 })
 
-            return jsonify({"segments": result_segments})
+            return jsonify({"segments": result_segments, "other_configured": other_configured})
 
     @app.route("/api/jump", methods=["POST"])
     def api_jump():
@@ -781,6 +829,21 @@ def get_parser():
         help="two arguments 'start_key end_key' each in YYYY/MM/DD/HHMMSS format. "
         "If provided, this annotation session will run only for that interval.",
     )
+    parser.add_argument(
+        "--other-annotations-dir",
+        type=Path,
+        default=None,
+        help="Directory containing another camera's annotations.*.json files. Intervals "
+        "where a labeled box actually appeared there, but that aren't yet annotated in "
+        "this session, are highlighted on the timeline.",
+    )
+    parser.add_argument(
+        "--other-labels",
+        nargs="+",
+        default=None,
+        help="Label names to look for in --other-annotations-dir (e.g. 'person' 'car'). "
+        "If omitted, any labeled box counts, regardless of class.",
+    )
     return parser
 
 
@@ -792,12 +855,20 @@ def run_app(
     paused: bool = False,
     start_key: Optional[str] = None,
     end_key: Optional[str] = None,
+    other_annotations_dir: Optional[Path] = None,
+    other_labels: Optional[list[str]] = None,
 ):
     if labels_dict is None:
         labels_dict = {}
 
     existing_annot_files = load_all_annotation_files(image_dir)
     covered = compute_covered_interval(existing_annot_files)
+
+    other_covered = None
+    if other_annotations_dir is not None:
+        other_covered = compute_labeled_interval(
+            load_all_annotation_files(other_annotations_dir), other_labels
+        )
 
     # Merge labels from all existing annotation files, with later files winning.
     merged_labels = {}
@@ -815,6 +886,7 @@ def run_app(
         end_key=end_key,
         existing_annot_files=existing_annot_files,
         covered=covered,
+        other_covered=other_covered,
     )
 
     # Load the first frame synchronously before starting the server.
@@ -869,6 +941,8 @@ def main(args):
         paused=args.paused,
         start_key=start_key,
         end_key=end_key,
+        other_annotations_dir=args.other_annotations_dir,
+        other_labels=args.other_labels,
     )
 
 
