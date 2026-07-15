@@ -245,7 +245,7 @@ def poll_loop(monitors: list[CameraMonitor], interval: float) -> None:
             sleep_time = next_poll - time.monotonic()
             if sleep_time > 0:
                 time.sleep(sleep_time)
-            else:
+            elif sleep_time < -1 / 30:
                 logger.warning(f"Poll cycle overran by {-sleep_time:.2f}s")
             next_poll += interval
 

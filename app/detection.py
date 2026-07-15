@@ -152,7 +152,12 @@ class OnnxYoloDetectionModel(DetectionModel):
         h, w = image.shape[:2]
         if (w, h) != self.img_size:
             pad_w, pad_h = self.img_size[0] - w, self.img_size[1] - h
-            image = np.pad(image, [(0, pad_h), (0, pad_w), (0, 0)], mode="constant", constant_values=127)
+            if pad_w < 0 or pad_h < 0:
+                image = cv.resize(image, (w, h), interpolation=cv.INTER_AREA)
+            else:
+                image = np.pad(
+                    image, [(0, pad_h), (0, pad_w), (0, 0)], mode="constant", constant_values=127
+                )
         return (image.transpose(2, 0, 1)[None, ::-1, :, :] / 255).astype(np.float32)
 
     def initialize_from_logs(self, log_dir: Path, now: Optional[float] = None):
