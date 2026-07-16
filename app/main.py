@@ -8,8 +8,6 @@ from functools import partial
 from pathlib import Path
 from typing import Optional
 
-from app.image_loader import create_timestamped_filename
-
 try:
     import app
 except ImportError:
@@ -20,6 +18,8 @@ import numpy as np
 import requests
 import yaml
 
+
+from app.image_loader import create_timestamped_filename
 from app.detection import create_detector
 from app.utils import BoundingBox, chain_callbacks, get_logger
 from app.camera_monitor import (
