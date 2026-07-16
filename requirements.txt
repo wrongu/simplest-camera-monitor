@@ -9,3 +9,4 @@ onnx
 onnxruntime
 onnxslim
 portion
+paho-mqtt>=2.0

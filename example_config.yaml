@@ -23,5 +23,27 @@ cameras:
     model_file: null # If specified, path to a .pkl file containing a sklearn model.
     log_lifespan: 43200.0 # Lifespan of log entries in seconds (e.g., 43200 for 12 hours); older images will automatically be cleaned up to save space.
 poll_frequency: 5.0 # Time in seconds between each poll of the camera stream for motion detection (e.g., 5.0 for every 5 seconds)
+
+# Each class here drives HA entity creation (per camera): a numeric `<cam>_<class>_confidence`
+# sensor and a `<cam>_<class>` binary detection sensor, published via MQTT Discovery.
+# NOTE: the background-subtraction + morphology classifier does not produce a calibrated
+# confidence (BoundingBox.confidence stays 1.0), so its confidence sensor only reads 0/100.
+# Meaningful confidence requires a YOLO / ONNX-YOLO detector.
 watch_for_class: # List of object classes as strings to trigger. Only valid if there is a model file.
   - person
+
+# --- Reporting to Home Assistant ------------------------------------------------------------
+reporting: "mqtt" # or "rest" for the REST api or "none" for no callbacks (local debugging)
+publish_images: true # publish an annotated "last detection" image entity per camera
+
+# MQTT broker connection. When running as an add-on with `services: [mqtt:need]`, leave this
+# out entirely — the broker is auto-discovered from the Supervisor Services API. Provide it
+# explicitly for dev-machine runs against any broker. `base_topic`/`discovery_prefix` here are
+# honored even when the broker itself is auto-discovered.
+# mqtt:
+#   host: "localhost"
+#   port: 1883
+#   username: "mqtt_user"
+#   password: "mqtt_pass"
+#   base_topic: "camera_monitor"
+#   discovery_prefix: "homeassistant"

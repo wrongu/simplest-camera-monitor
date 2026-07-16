@@ -30,8 +30,15 @@ from app.camera_monitor import (
     OnGetImageCallback,
 )
 from app.cameras import ONVIFCameraWrapper
+from app.mqtt_client import MqttPublisher
 
 ONE_DAY_SECONDS = 24 * 60 * 60
+
+
+def slugify(name: str) -> str:
+    """Camera name -> entity-id slug, matching the existing HA entity-id convention."""
+    return name.lower().replace(" ", "_")
+
 
 CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "/config/config.yaml"))
 
@@ -150,6 +157,184 @@ def make_handle_detections(
     return handle_detections
 
 
+# ---------------------------------------------------------------------------
+# MQTT reporting (MQTT Discovery — replaces the REST path above)
+# ---------------------------------------------------------------------------
+
+
+def resolve_mqtt_config(config: dict) -> Optional[dict]:
+    """Resolve broker connection settings.
+
+    Order:
+      1. Explicit ``mqtt:`` block in the config (needed for dev-machine runs).
+      2. Otherwise, if running as an add-on, fetch host/port/credentials from the Supervisor
+         Services API (the official Mosquitto add-on).
+
+    ``base_topic`` / ``discovery_prefix`` from an ``mqtt:`` block always win, even when the
+    broker itself is auto-discovered.
+    """
+    mqtt_cfg = dict(config.get("mqtt") or {})
+    resolved = {"base_topic": "camera_monitor", "discovery_prefix": "homeassistant"}
+
+    # Explicit block with a host: use it verbatim.
+    if mqtt_cfg.get("host"):
+        resolved.update(mqtt_cfg)
+        return resolved
+
+    # No explicit host — try the Supervisor Services API.
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if token:
+        try:
+            resp = requests.get(
+                "http://supervisor/services/mqtt",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=5,
+            )
+            resp.raise_for_status()
+            data = resp.json()["data"]
+            resolved.update(
+                {
+                    "host": data["host"],
+                    "port": data.get("port", 1883),
+                    "username": data.get("username"),
+                    "password": data.get("password"),
+                }
+            )
+            # Let an mqtt: block still override topic/prefix (but not the broker).
+            for key in ("base_topic", "discovery_prefix"):
+                if key in mqtt_cfg:
+                    resolved[key] = mqtt_cfg[key]
+            return resolved
+        except Exception as e:
+            logger.error(f"Failed to fetch MQTT service from Supervisor: {e}")
+
+    return None
+
+
+def publish_all_discovery(
+    publisher: MqttPublisher, config: dict, watch_for_class: list[str], *, publish_images: bool
+) -> None:
+    """Publish retained MQTT Discovery configs for every (camera, class): a confidence sensor
+    plus an optional per-camera image entity.
+    """
+    for cam_cfg in config["cameras"]:
+        monitor_name = cam_cfg.get("name", "")
+        cam = slugify(monitor_name)
+        node = f"camera_monitor_{cam}"
+        device = {
+            "identifiers": [f"camera_monitor_{cam}"],
+            "name": monitor_name,
+            "manufacturer": "camera-monitor",
+        }
+        avail = {
+            "availability": [
+                {"topic": publisher.bridge_availability_topic},
+                {"topic": publisher.availability_topic(cam)},
+            ],
+            "availability_mode": "all",
+        }
+
+        for cls in watch_for_class:
+            publisher.publish_discovery(
+                "sensor",
+                node,
+                f"{cls}_confidence",
+                {
+                    "name": f"{monitor_name} {cls} confidence",
+                    "unique_id": f"camera_monitor_{cam}_{cls}_confidence",
+                    "state_topic": publisher.state_topic(cam),
+                    "value_template": (
+                        f"{{{{ (value_json.classes['{cls}'].conf * 100) | round(0) }}}}"
+                    ),
+                    "unit_of_measurement": "%",
+                    "state_class": "measurement",
+                    "device": device,
+                    **avail,
+                },
+            )
+
+        # One "last detection" image entity per camera.
+        if publish_images:
+            publisher.publish_discovery(
+                "image",
+                node,
+                "last_detection",
+                {
+                    "name": f"{monitor_name} last detection",
+                    "unique_id": f"camera_monitor_{cam}_last_detection",
+                    "image_topic": publisher.image_topic(cam),
+                    "image_encoding": "b64",
+                    "device": device,
+                    **avail,
+                },
+            )
+
+
+def make_handle_state_transition_mqtt(publisher: MqttPublisher) -> OnStateTransitionCallback:
+    def handle_state_transition(monitor: CameraMonitor, new_state: State):
+        cam = slugify(monitor.name)
+        if new_state == State.RUNNING:
+            publisher.publish_availability(cam, "online")
+        elif new_state in (State.CANT_CONNECT, State.CRASHED, State.REBOOT):
+            publisher.publish_availability(cam, "offline")
+
+    return handle_state_transition
+
+
+def make_handle_detections_mqtt(
+    publisher: MqttPublisher, watch_for_class: list[str]
+) -> OnDetectionCallback:
+    """Build per-frame state JSON (max conf + count per watched class) and publish it. Every
+    frame is published — including empty ones — so a class that stops being seen drops to 0."""
+
+    def handle_detections(monitor: CameraMonitor, detections: list[BoundingBox]):
+        classes = {cls: {"conf": 0.0, "count": 0} for cls in watch_for_class}
+        for det in detections:
+            entry = classes.get(det.class_id)
+            if entry is not None:
+                entry["count"] += 1
+                entry["conf"] = max(entry["conf"], float(det.confidence))
+        payload = {"ts": monitor.last_timestamp, "classes": classes}
+        publisher.publish_state(slugify(monitor.name), payload)
+
+    return handle_detections
+
+
+def make_handle_image_mqtt(
+    publisher: MqttPublisher, min_interval: float = 1.0, max_size: Optional[int] = None
+) -> OnDetectionCallback:
+    """Publish an annotated, downscaled JPEG of the latest frame when a watched class is
+    detected. Rate-limited to at most one image per ``min_interval`` seconds per camera."""
+    last_pub: dict[str, float] = {}
+
+    def handle_image(monitor: CameraMonitor, detections: list[BoundingBox]):
+        if len(detections) == 0:
+            return
+        cam = slugify(monitor.name)
+        now = time.monotonic()
+        if now - last_pub.get(cam, 0.0) < min_interval:
+            return
+        _, frame = monitor.camera.get_last_frame()
+        if frame is None:
+            return
+        annotated = frame.copy()
+        for det in detections:
+            annotated = det.draw(annotated, color=(255, 150, 0))
+        h, w = annotated.shape[:2]
+        if max_size is not None and w > max_size:
+            scale = max_size / w
+            annotated = cv2.resize(
+                annotated, (max_size, int(round(h * scale))), interpolation=cv2.INTER_AREA
+            )
+        ok, buf = cv2.imencode(".jpg", annotated)
+        if not ok:
+            return
+        publisher.publish_image(cam, buf.tobytes())
+        last_pub[cam] = now
+
+    return handle_image
+
+
 def save_detection_snapshot(save_dir: Path, monitor: CameraMonitor, detections: list[BoundingBox]):
     if detections:
         ts, frame = monitor.camera.get_last_frame()
@@ -252,9 +437,9 @@ def poll_loop(monitors: list[CameraMonitor], interval: float) -> None:
 
 def cleanup_loop(monitors: list[CameraMonitor]) -> None:
     while True:
-        time.sleep(ONE_DAY_SECONDS / 24)  # Run cleanup every hour
         for monitor in monitors:
             monitor.cleanup_files()
+        time.sleep(ONE_DAY_SECONDS / 24)  # Run cleanup every hour
 
 
 # ---------------------------------------------------------------------------
@@ -348,30 +533,68 @@ def main():
     with open(CONFIG_PATH) as f:
         config = yaml.safe_load(f)
 
-    # Connect a client
-    client = HomeAssistantClient(
-        binary_sensors=[
-            f"{cam['name']} {c} detector"
-            for cam in config["cameras"]
-            for c in config.get("watch_for_class", [])
-        ]
-    )
+    watch_for_class = config.get("watch_for_class", [])
+    reporting = config.get("reporting", "mqtt")
 
-    handle_state = make_handle_state_transition(client, config.get("watch_for_class", []))
-    handle_detections = make_handle_detections(client, config.get("watch_for_class", []))
+    detection_callbacks: list[OnDetectionCallback] = []
+    state_callbacks: list[OnStateTransitionCallback] = []
+    publisher: Optional[MqttPublisher] = None
+
+    if reporting == "rest":
+        # Legacy path — Supervisor REST state-setting. TODO - remove/deprecate.
+        logger.info("Reporting via HA Supervisor REST API")
+        client = HomeAssistantClient(
+            binary_sensors=[
+                f"{cam['name']} {c} detector" for cam in config["cameras"] for c in watch_for_class
+            ]
+        )
+        state_callbacks.append(make_handle_state_transition(client, watch_for_class))
+        detection_callbacks.append(make_handle_detections(client, watch_for_class))
+    elif reporting == "mqtt":
+        logger.info("Reporting via MQTT Discovery")
+        mqtt_cfg = resolve_mqtt_config(config)
+        if mqtt_cfg is None:
+            logger.error(
+                "reporting: mqtt selected but no broker could be resolved. Add an mqtt: block "
+                "to the config, or run as an add-on with `services: [mqtt:need]`."
+            )
+            return
+        publisher = MqttPublisher(**mqtt_cfg)
+        publisher.connect()
+
+        publish_images = config.get("publish_images", True)
+        binary_trigger_threshold = config.get("binary_trigger_threshold", None)
+        # Discovery must be published before any state/availability so HA has the entities.
+        publish_all_discovery(
+            publisher,
+            config,
+            watch_for_class,
+            publish_images=publish_images,
+            binary_trigger_threshold=binary_trigger_threshold,
+        )
+        state_callbacks.append(make_handle_state_transition_mqtt(publisher))
+        detection_callbacks.append(make_handle_detections_mqtt(publisher, watch_for_class))
+        if publish_images:
+            detection_callbacks.append(make_handle_image_mqtt(publisher, watch_for_class))
+    elif reporting == "none":
+        pass
+    else:
+        logger.error(f"Unknown reporting mode: {reporting!r} (expected 'mqtt', 'rest', or 'none')")
+        return
+
+    on_state_transition = chain_callbacks(*state_callbacks) if state_callbacks else None
+    on_detection = chain_callbacks(*detection_callbacks) if detection_callbacks else None
 
     monitors = init_monitors(
         config,
-        on_state_transition=handle_state,
-        on_detection=[handle_detections, partial(save_detection_snapshot, Path())],
+        on_state_transition=on_state_transition,
+        on_detection=on_detection,
     )
     if not monitors:
         logger.error("No cameras initialized. Exiting.")
+        if publisher is not None:
+            publisher.disconnect()
         return
-
-    # Initial file cleanup
-    for monitor in monitors:
-        monitor.cleanup_files()
 
     poll_interval = config["poll_frequency"]
     threading.Thread(
@@ -383,7 +606,13 @@ def main():
         f"Camera monitor running: {len(monitors)} camera(s), " f"poll_frequency={poll_interval}s"
     )
     # Block the main thread indefinitely
-    threading.Event().wait()
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        logger.info("Shutting down")
+    finally:
+        if publisher is not None:
+            publisher.disconnect()
 
 
 if __name__ == "__main__":

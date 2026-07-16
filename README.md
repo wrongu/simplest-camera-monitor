@@ -30,10 +30,34 @@ Offline tooling to build labeled training datasets and train a decision-tree cla
 Runs the monitor as a native HA App:
 
 - Reads camera config from `/config/camera_monitor.yaml` on the HA host
-- Authenticates to the HA Supervisor REST API via `SUPERVISOR_TOKEN`
-- Updates HA binary sensor entities on detections and state transitions
+- Reports detections to Home Assistant via **MQTT Discovery** (default) or the legacy
+  Supervisor REST API (`reporting: rest`)
 - Multi-threaded: poll loop + 4-hour cleanup loop
 - Docker image compiled from Alpine with OpenCV built from source
+
+## Home Assistant entities (MQTT Discovery)
+
+The app does all the CV work and publishes results to MQTT; must have HA's built-in MQTT integration 
+running. MQTT turns results into entities.
+
+For every `(camera, class)` in `watch_for_class`, HA auto-creates, grouped under a per-camera
+device:
+
+- `sensor.<cam>_<class>_confidence` — detection confidence for that class in the latest
+  frame, as a percentage. Max over all boxes. HA tracks statistics over time. Caveat:
+  will be binary (0% or 100%) if using the `BackgroundModelWithMorphologyClassifier` detector
+- `image.<cam>_last_detection` — the latest annotated frame with boxes drawn (one per camera).
+
+Camera health drives availability: entities go **Unavailable** when the camera can't connect,
+and a hard add-on crash marks everything unavailable via the MQTT Last Will.
+
+### Broker setup
+
+- **As an add-on:** install the official *Mosquitto broker* add-on and the *MQTT* integration.
+  With `services: [mqtt:need]` in the manifest, the broker is injected automatically — no
+  credential config needed.
+- **On a dev machine:** point at any broker with an `mqtt:` block in the config (see
+  `example_config.yaml`).
 
 ## Running as a Home Assistant App
 
