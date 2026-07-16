@@ -563,19 +563,12 @@ def main():
         publisher.connect()
 
         publish_images = config.get("publish_images", True)
-        binary_trigger_threshold = config.get("binary_trigger_threshold", None)
         # Discovery must be published before any state/availability so HA has the entities.
-        publish_all_discovery(
-            publisher,
-            config,
-            watch_for_class,
-            publish_images=publish_images,
-            binary_trigger_threshold=binary_trigger_threshold,
-        )
+        publish_all_discovery(publisher, config, watch_for_class, publish_images=publish_images)
         state_callbacks.append(make_handle_state_transition_mqtt(publisher))
         detection_callbacks.append(make_handle_detections_mqtt(publisher, watch_for_class))
         if publish_images:
-            detection_callbacks.append(make_handle_image_mqtt(publisher, watch_for_class))
+            detection_callbacks.append(make_handle_image_mqtt(publisher))
     elif reporting == "none":
         pass
     else:
