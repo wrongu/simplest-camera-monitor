@@ -315,7 +315,7 @@ def make_handle_image_mqtt(
         _, frame = monitor.camera.get_last_frame()
         if frame is None:
             return
-        annotated = frame.copy()
+        annotated = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         for det in detections:
             annotated = det.draw(annotated, color=(255, 150, 0))
         h, w = annotated.shape[:2]
