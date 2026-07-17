@@ -59,6 +59,19 @@ and a hard add-on crash marks everything unavailable via the MQTT Last Will.
 - **On a dev machine:** point at any broker with an `mqtt:` block in the config (see
   `example_config.yaml`).
 
+### Dashboard card
+
+A Picture Entity card gives the "last detected objects" view:
+
+```yaml
+type: picture-entity
+entity: image.frontdoor_frontdoor_last_detection
+camera_view: auto
+show_state: false
+```
+
+Replace `frontdoor` with your camera name slugified (lowercased, spaces → underscores).
+
 ## Running as a Home Assistant App
 
 1. Clone this repo into `/addons/local/` on your HA host
