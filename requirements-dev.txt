@@ -6,3 +6,4 @@ tqdm
 ultralytics[export]
 torch
 imagesize
+opencv-contrib-python
