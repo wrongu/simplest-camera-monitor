@@ -308,8 +308,6 @@ def make_handle_image_mqtt(
     last_pub: dict[str, float] = {}
 
     def handle_image(monitor: CameraMonitor, detections: list[BoundingBox]):
-        if len(detections) == 0:
-            return
         cam = slugify(monitor.name)
         now = time.monotonic()
         if now - last_pub.get(cam, 0.0) < min_interval:
@@ -497,11 +495,36 @@ def run_live():
                 2,
             )
 
+    state_callbacks = [handle_state]
+    detection_callbacks = [handle_detect]
+    frame_callbacks = [handle_frame]
+
+    if config.get("reporting", "none") == "mqtt":
+        watch_for_class = ["person"]
+        logger.info("Reporting via MQTT Discovery")
+        mqtt_cfg = resolve_mqtt_config(config)
+        if mqtt_cfg is None:
+            logger.error(
+                "reporting: mqtt selected but no broker could be resolved. Add an mqtt: block "
+                "to the config, or run as an add-on with `services: [mqtt:need]`."
+            )
+            return
+        publisher = MqttPublisher(**mqtt_cfg)
+        publisher.connect()
+
+        publish_images = config.get("publish_images", True)
+        # Discovery must be published before any state/availability so HA has the entities.
+        publish_all_discovery(publisher, config, watch_for_class, publish_images=publish_images)
+        state_callbacks.append(make_handle_state_transition_mqtt(publisher))
+        detection_callbacks.append(make_handle_detections_mqtt(publisher, watch_for_class))
+        if publish_images:
+            detection_callbacks.append(make_handle_image_mqtt(publisher))
+
     monitors = init_monitors(
         config,
-        on_get_image=handle_frame,
-        on_state_transition=handle_state,
-        on_detection=handle_detect,
+        on_get_image=chain_callbacks(*frame_callbacks),
+        on_state_transition=chain_callbacks(*state_callbacks),
+        on_detection=chain_callbacks(*detection_callbacks),
     )
     if not monitors:
         logger.error("No cameras initialized. Exiting.")
