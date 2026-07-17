@@ -392,6 +392,8 @@ def init_monitors(
                 on_get_image=on_get_image,
                 on_state_transition=on_state_transition,
                 on_detection=on_detection,
+                confidence_threshold=cam_config.get("confidence_threshold", 0.5),
+                roi=cam_config.get("roi"),
             )
             monitor_slots[i] = mon
         except Exception as e:

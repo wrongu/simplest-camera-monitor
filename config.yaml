@@ -1,6 +1,6 @@
 name: "Camera Monitor"
 description: "ONVIF camera motion detection and object classification"
-version: "1.5.4"
+version: "1.5.4a"
 slug: "camera_monitor"
 init: false
 homeassistant_api: true # TODO - remove this if/when REST is removed
