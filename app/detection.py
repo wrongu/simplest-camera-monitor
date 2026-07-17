@@ -28,6 +28,9 @@ logger = get_logger("detection", batching=300)
 
 
 class DetectionModel(Protocol):
+    @property
+    def classes(self) -> list[str]: ...
+
     def initialize_from_logs(self, log_dir: Path): ...
 
     def process_frame(self, frame: cv.Mat, timestamp: float) -> list[BoundingBox]: ...
@@ -53,6 +56,10 @@ class BackgroundModelWithMorphologyClassifier(DetectionModel):
         self.classifier = model_metadata["model"]
         self.label_lookup: dict[int, str] = model_metadata["label_lookup"]
         logger.info(f"Loaded model with labels: {self.label_lookup}")
+
+    @property
+    def classes(self) -> list[str]:
+        return list(self.label_lookup.values())
 
     def initialize_from_logs(self, log_dir: Path, now: Optional[float] = None):
         if log_dir is None:
@@ -99,6 +106,10 @@ class YoloDetectionModel(DetectionModel):
         self.roi_img = cv.imread(str(roi), cv.IMREAD_GRAYSCALE) if roi is not None else None
         self.brightness_threshold = brightness_threshold
         self.confidence_threshold = confidence_threshold
+
+    @property
+    def classes(self) -> list[str]:
+        return list(self.yolo.names.values())
 
     def is_in_roi(self, x: float, y: float):
         if self.roi_img is not None:
@@ -147,6 +158,10 @@ class OnnxYoloDetectionModel(DetectionModel):
         self.roi_img = cv.imread(str(roi), cv.IMREAD_GRAYSCALE) if roi is not None else None
         self.brightness_threshold = brightness_threshold
         self.confidence_threshold = confidence_threshold
+
+    @property
+    def classes(self) -> list[str]:
+        return list(self.class_lookup.values())
 
     def is_in_roi(self, x: float, y: float):
         if self.roi_img is not None:
