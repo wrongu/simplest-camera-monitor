@@ -477,22 +477,13 @@ def run_live():
 
     def handle_detect(mon: CameraMonitor, boxes: list[BoundingBox]):
         for box in boxes:
-            cv2.rectangle(
+            box.draw(
                 frames[mon.name],
-                (box.x, box.y),
-                (box.x + box.width, box.y + box.height),
-                color=(0, 255, 0),
-                thickness=2,
-                lineType=cv2.LINE_AA,
-            )
-            cv2.putText(
-                frames[mon.name],
-                f"[{box.class_id}]",
-                (box.x + box.width // 2, box.y + box.height // 2),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2,
+                color=(
+                    int(127 * (1 - box.confidence)),
+                    int(255 * box.confidence),
+                    int(127 * (1 - box.confidence)),
+                ),
             )
 
     state_callbacks = [handle_state]
