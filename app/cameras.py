@@ -182,7 +182,7 @@ class ONVIFCameraWrapper(Camera):
         if frame is not None and not np.array_equal(frame, self.last_frame_raw):
             frame = frame.copy()
             self.last_frame_raw = frame
-            frame = _maybe_resize(frame, self._resolution)
+            frame = cv.cvtColor(_maybe_resize(frame, self._resolution), cv.COLOR_BGR2RGB)
             self.last_frame = frame
             self.last_frame_time = now
         elif frame is None and now - self.last_frame_time > _NO_FRAME_TIMEOUT:
@@ -219,7 +219,7 @@ class ESPHomeCameraWrapper(Camera):
         resp = requests.get(self.url, timeout=10)
         if resp.status_code == 200:
             image_array = np.asarray(bytearray(resp.content), dtype=np.uint8)
-            frame = _maybe_resize(cv.imdecode(image_array, cv.IMREAD_COLOR), self._resolution)
+            frame = _maybe_resize(cv.imdecode(image_array, cv.IMREAD_COLOR_RGB), self._resolution)
             self.last_frame = frame
             self.last_frame_time = time.time()
             return self.last_frame_time, frame
@@ -271,7 +271,7 @@ class LoggedImagePseudoCamera(Camera):
     def get_frame(self) -> tuple[float, cv.Mat]:
         self.last_frame_idx += 1
         ts, im = self.timestamped_images[self.last_frame_idx]
-        self._last_frame = _maybe_resize(cv.imread(str(im), cv.IMREAD_COLOR), self._resolution)
+        self._last_frame = _maybe_resize(cv.imread(str(im), cv.IMREAD_COLOR_RGB), self._resolution)
         return ts, self._last_frame
 
     def get_last_frame(self) -> tuple[float, cv.Mat]:

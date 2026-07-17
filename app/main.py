@@ -464,7 +464,7 @@ def run_live():
             print(e)
 
     def handle_frame(mon: CameraMonitor, frame: np.ndarray, timestamp: float):
-        frames[mon.name] = frame
+        frames[mon.name] = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
     def handle_state(mon: CameraMonitor, st: State):
         cv2.putText(

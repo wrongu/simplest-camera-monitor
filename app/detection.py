@@ -130,6 +130,8 @@ class OnnxYoloDetectionModel(DetectionModel):
     def __init__(self, weights: Path, brightness_threshold: float = 0.0):
         self.model = OnnxSession(weights)
         meta = self.model.get_modelmeta()
+        # Docs say that exported imgsz value is (height, width). It's plausible that this is (width, height), but in
+        # our case they are expected to be equal. If we get it wrong then the inference pass should throw an error.
         self.img_size = tuple(literal_eval(meta.custom_metadata_map["imgsz"]))
         self.class_lookup = literal_eval(meta.custom_metadata_map["names"])
         self.brightness_threshold = brightness_threshold
@@ -138,18 +140,37 @@ class OnnxYoloDetectionModel(DetectionModel):
     def classes(self) -> list[str]:
         return list(self.class_lookup.values())
 
-    def prep_image(self, image: np.ndarray) -> np.ndarray:
-        image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
-        h, w = image.shape[:2]
-        if (w, h) != self.img_size:
-            pad_w, pad_h = self.img_size[0] - w, self.img_size[1] - h
-            if pad_w < 0 or pad_h < 0:
-                image = cv.resize(image, (w, h), interpolation=cv.INTER_AREA)
-            else:
-                image = np.pad(
-                    image, [(0, pad_h), (0, pad_w), (0, 0)], mode="constant", constant_values=127
-                )
-        return (image.transpose(2, 0, 1)[None, ::-1, :, :] / 255).astype(np.float32)
+    def letterbox(
+        self, img: cv.Mat, gray=(114, 114, 114), scaleup=True
+    ) -> tuple[cv.Mat, float, tuple[int, int]]:
+        """Aspect-preserving resize + gray padding.
+
+        Returns the padded image, the scale ratio r, and (dw, dh) one-sided padding.
+        """
+        shape = img.shape[:2]  # (h, w)
+
+        r: float = min(self.img_size[0] / shape[0], self.img_size[1] / shape[1])
+        if not scaleup:  # only downscale (better val mAP); predict uses True
+            r = min(r, 1.0)
+
+        new_unpad = (round(shape[1] * r), round(shape[0] * r))  # (w, h)
+        # Floating point half-padding
+        dw: float = (self.img_size[1] - new_unpad[0]) / 2
+        dh: float = (self.img_size[0] - new_unpad[1]) / 2
+
+        if shape[::-1] != new_unpad:
+            img = cv.resize(img, new_unpad, interpolation=cv.INTER_LINEAR)
+
+        # Even/odd-aware int padding
+        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        img = cv.copyMakeBorder(img, top, bottom, left, right, cv.BORDER_CONSTANT, value=gray)
+        return img, r, (left, top)
+
+    def prep_image(self, image: cv.Mat) -> tuple[cv.Mat, float, tuple[int, int]]:
+        image, r, (left, top) = self.letterbox(cv.cvtColor(image, cv.COLOR_BGR2RGB))
+        image_bchw = (image.transpose(2, 0, 1)[None] / 255).astype(np.float32)
+        return image_bchw, r, (left, top)
 
     def initialize_from_logs(self, log_dir: Path, now: Optional[float] = None):
         pass
@@ -159,14 +180,25 @@ class OnnxYoloDetectionModel(DetectionModel):
         if np.median(frame.ravel()) < self.brightness_threshold:
             return []
 
-        aspect_w = self.img_size[0] / frame.shape[1]
-        aspect_h = self.img_size[1] / frame.shape[0]
-
-        raw_output = self.model.run(None, {"images": self.prep_image(frame)})[0][0]
-        onnx_bboxes = [YoloBoundingBox(*row) for row in raw_output]
+        frame_bchw, scaled_by, (left, top) = self.prep_image(frame)
+        raw_output = self.model.run(None, {"images": frame_bchw})[0][0]
+        x1, y1, x2, y2, conf, cls = raw_output.T
+        names = [self.class_lookup[c] for c in cls]
+        x1 = ((x1 - left) / scaled_by).round().astype(int).tolist()
+        x2 = ((x2 - left) / scaled_by).round().astype(int).tolist()
+        y1 = ((y1 - top) / scaled_by).round().astype(int).tolist()
+        y2 = ((y2 - top) / scaled_by).round().astype(int).tolist()
+        conf = conf.tolist()
         return [
-            BoundingBox.from_yolo(box, self.class_lookup).unscale((aspect_w, aspect_h))
-            for box in onnx_bboxes
+            BoundingBox(
+                x=min(_x1, _x2),
+                y=min(_y1, _y2),
+                width=abs(_x2 - _x1),
+                height=abs(_y2 - _y1),
+                class_id=_n,
+                confidence=_c,
+            )
+            for _x1, _y1, _x2, _y2, _n, _c in zip(x1, y1, x2, y2, names, conf)
         ]
 
 
