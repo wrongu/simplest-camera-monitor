@@ -115,8 +115,9 @@ class CameraMonitor(object):
             if time.time() - self.state_meta.get("since", 0) < 60:
                 try:
                     timestamp, frame = self.camera.get_frame()
-                    self.state_transition(State.RUNNING, since=time.time())
-                    self.log_frame(frame, timestamp=timestamp)
+                    if frame is not None:
+                        self.state_transition(State.RUNNING, since=time.time())
+                        self.log_frame(frame, timestamp=timestamp)
                 except ConnectionError:
                     pass
             # After a minute, try sending a reboot signal to the camera
@@ -134,8 +135,9 @@ class CameraMonitor(object):
             if time.time() - self.state_meta.get("since", 0) > 30:
                 try:
                     timestamp, frame = self.camera.get_frame()
-                    self.state_transition(State.RUNNING, since=time.time())
-                    self.log_frame(frame, timestamp=timestamp)
+                    if frame is not None:
+                        self.state_transition(State.RUNNING, since=time.time())
+                        self.log_frame(frame, timestamp=timestamp)
                 except ConnectionError:
                     logger.warning("Still cannot connect after reboot attempt")
                     self.state_transition(State.CRASHED, since=time.time())
