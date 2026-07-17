@@ -512,7 +512,7 @@ def run_live():
         publisher = MqttPublisher(**mqtt_cfg)
         publisher.connect()
 
-        publish_images = config.get("publish_images", True)
+        publish_images = config.get("mqtt_publish_images", False)
         # Discovery must be published before any state/availability so HA has the entities.
         publish_all_discovery(publisher, config, watch_for_class, publish_images=publish_images)
         state_callbacks.append(make_handle_state_transition_mqtt(publisher))
@@ -585,7 +585,7 @@ def main():
         publisher = MqttPublisher(**mqtt_cfg)
         publisher.connect()
 
-        publish_images = config.get("publish_images", True)
+        publish_images = config.get("mqtt_publish_images", False)
         # Discovery must be published before any state/availability so HA has the entities.
         publish_all_discovery(publisher, config, watch_for_class, publish_images=publish_images)
         state_callbacks.append(make_handle_state_transition_mqtt(publisher))

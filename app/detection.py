@@ -95,26 +95,13 @@ class BackgroundModelWithMorphologyClassifier(DetectionModel):
 
 
 class YoloDetectionModel(DetectionModel):
-    def __init__(
-        self,
-        weights: Path,
-        roi: Optional[str | Path] = None,
-        brightness_threshold: float = 0.0,
-        confidence_threshold: float = 0.5,
-    ):
+    def __init__(self, weights: Path, brightness_threshold: float = 0.0):
         self.yolo = YOLO(weights, task="detect")
-        self.roi_img = cv.imread(str(roi), cv.IMREAD_GRAYSCALE) if roi is not None else None
         self.brightness_threshold = brightness_threshold
-        self.confidence_threshold = confidence_threshold
 
     @property
     def classes(self) -> list[str]:
         return list(self.yolo.names.values())
-
-    def is_in_roi(self, x: float, y: float):
-        if self.roi_img is not None:
-            return self.roi_img[int(round(y)), int(round(x))] > 127
-        return True
 
     def initialize_from_logs(self, log_dir: Path, now: Optional[float] = None):
         pass
@@ -126,47 +113,30 @@ class YoloDetectionModel(DetectionModel):
 
         frame_rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
         detections = self.yolo.predict(frame_rgb)
-        detections_out = []
+        yolo_boxes = [
+            YoloBoundingBox(
+                *yolo_box.xywh.flatten().cpu().numpy(),
+                yolo_box.conf.item(),
+                yolo_box.cls.cpu().numpy().astype(int).item(),
+            )
+            for det in detections
+            for yolo_box in det.boxes
+        ]
 
-        for det in detections:
-            for yolo_box in det.boxes:
-                box = BoundingBox.from_yolo(
-                    YoloBoundingBox(
-                        *yolo_box.xywh.flatten().cpu().numpy(),
-                        yolo_box.conf.item(),
-                        yolo_box.cls.cpu().numpy().astype(int).item(),
-                    ),
-                    self.yolo.names,
-                )
-                if self.is_in_roi(box.cx, box.cy) and box.confidence > self.confidence_threshold:
-                    detections_out.append(box)
-        return detections_out
+        return [BoundingBox.from_yolo(yolo_box, self.yolo.names) for yolo_box in yolo_boxes]
 
 
 class OnnxYoloDetectionModel(DetectionModel):
-    def __init__(
-        self,
-        weights: Path,
-        roi: Optional[str | Path] = None,
-        brightness_threshold: float = 0.0,
-        confidence_threshold: float = 0.5,
-    ):
+    def __init__(self, weights: Path, brightness_threshold: float = 0.0):
         self.model = OnnxSession(weights)
         meta = self.model.get_modelmeta()
         self.img_size = tuple(literal_eval(meta.custom_metadata_map["imgsz"]))
         self.class_lookup = literal_eval(meta.custom_metadata_map["names"])
-        self.roi_img = cv.imread(str(roi), cv.IMREAD_GRAYSCALE) if roi is not None else None
         self.brightness_threshold = brightness_threshold
-        self.confidence_threshold = confidence_threshold
 
     @property
     def classes(self) -> list[str]:
         return list(self.class_lookup.values())
-
-    def is_in_roi(self, x: float, y: float):
-        if self.roi_img is not None:
-            return self.roi_img[int(round(y)), int(round(x))] > 127
-        return True
 
     def prep_image(self, image: np.ndarray) -> np.ndarray:
         image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
@@ -194,14 +164,9 @@ class OnnxYoloDetectionModel(DetectionModel):
 
         raw_output = self.model.run(None, {"images": self.prep_image(frame)})[0][0]
         onnx_bboxes = [YoloBoundingBox(*row) for row in raw_output]
-        bboxes = [
+        return [
             BoundingBox.from_yolo(box, self.class_lookup).unscale((aspect_w, aspect_h))
             for box in onnx_bboxes
-        ]
-        return [
-            box
-            for box in bboxes
-            if self.is_in_roi(box.cx, box.cy) and box.confidence > self.confidence_threshold
         ]
 
 

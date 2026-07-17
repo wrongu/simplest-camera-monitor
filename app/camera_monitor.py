@@ -44,10 +44,22 @@ class CameraMonitor(object):
         on_get_image: Optional[OnGetImageCallback] = None,
         on_state_transition: Optional[OnStateTransitionCallback] = None,
         on_detection: Optional[OnDetectionCallback] = None,
+        confidence_threshold: float = 0.5,
+        roi: Optional[str | Path] = None,
     ):
         self.camera = camera
         self.name = name
         self.detector = detection_model
+        self.confidence_threshold = confidence_threshold
+
+        if roi is None:
+            self._roi_image = None
+        else:
+            self._roi_image = cv.resize(
+                cv.imread(str(roi), cv.IMREAD_GRAYSCALE),
+                self.camera.resolution,
+                interpolation=cv.INTER_AREA,
+            )
 
         self.last_timestamp = 0
 
@@ -140,6 +152,13 @@ class CameraMonitor(object):
 
     def handle_detections(self, detected_things: list[BoundingBox]):
         if self.on_detection is not None:
+            # Filter by ROI and confidence
+            detected_things = [
+                box
+                for box in detected_things
+                if self._is_in_roi(box) and box.confidence >= self.confidence_threshold
+            ]
+            # Dispatch to callbacks
             try:
                 self.on_detection(self, detected_things)
             except Exception as e:
@@ -188,3 +207,11 @@ class CameraMonitor(object):
             if not files and not subdirs and path != self.output_dir:
                 path.rmdir()
         logger.info("Cleanup complete.")
+
+    def _is_in_roi(self, box: BoundingBox):
+        if self._roi_image is not None:
+            x, y = int(round(box.cx)), int(round(box.cy))
+            if x < 0 or y < 0 or x >= self.camera.resolution[0] or y >= self.camera.resolution[1]:
+                return False
+            return self._roi_image[y, x] > 127
+        return True

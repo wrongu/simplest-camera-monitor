@@ -15,6 +15,8 @@ logger = get_logger("cameras")
 
 
 class Camera(Protocol):
+    @property
+    def resolution(self) -> tuple[int, int]: ...
     def get_frame(self) -> tuple[float, cv.Mat | None]: ...
     def get_last_frame(self) -> tuple[float, cv.Mat | None]: ...
     def reboot(self) -> bool: ...
@@ -85,6 +87,13 @@ class VideoStreamBackgroundThread(threading.Thread):
 _NO_FRAME_TIMEOUT = 10.0
 
 
+def _maybe_resize(image: cv.Mat, resolution: tuple[int, int]) -> cv.Mat:
+    h, w = image.shape[:2]
+    if (w, h) != resolution[:2]:
+        image = cv.resize(image, resolution, interpolation=cv.INTER_AREA)
+    return image
+
+
 class ONVIFCameraWrapper(Camera):
     def __init__(
         self,
@@ -153,6 +162,10 @@ class ONVIFCameraWrapper(Camera):
             self._init_failed = True
             self._init_error = e
 
+    @property
+    def resolution(self) -> tuple[int, int]:
+        return self._resolution[:2]
+
     def init_capture(self):
         if self.stream is not None:
             self.stream.stop()
@@ -169,9 +182,7 @@ class ONVIFCameraWrapper(Camera):
         if frame is not None and not np.array_equal(frame, self.last_frame_raw):
             frame = frame.copy()
             self.last_frame_raw = frame
-            h, w = frame.shape[:2]
-            if (w, h) != self._resolution:
-                frame = cv.resize(frame, self._resolution, interpolation=cv.INTER_AREA)
+            frame = _maybe_resize(frame, self._resolution)
             self.last_frame = frame
             self.last_frame_time = now
         elif frame is None and now - self.last_frame_time > _NO_FRAME_TIMEOUT:
@@ -191,19 +202,24 @@ class ONVIFCameraWrapper(Camera):
 
 
 class ESPHomeCameraWrapper(Camera):
-    def __init__(self, url: str):
+    def __init__(self, url: str, resolution: tuple[int, int]):
         self.url = url
         self.last_frame = None
         self.last_frame_time = 0
         # TODO - consider using the event stream API and keeping a persistent app:camera http connection open
         self.components = {"switch/reboot": None, "switch/flash": None}
         self.poll_components()
+        self._resolution = tuple(resolution)
+
+    @property
+    def resolution(self) -> tuple[int, int]:
+        return self._resolution
 
     def get_frame(self) -> tuple[float, cv.Mat]:
         resp = requests.get(self.url, timeout=10)
         if resp.status_code == 200:
             image_array = np.asarray(bytearray(resp.content), dtype=np.uint8)
-            frame = cv.imdecode(image_array, cv.IMREAD_COLOR)
+            frame = _maybe_resize(cv.imdecode(image_array, cv.IMREAD_COLOR), self._resolution)
             self.last_frame = frame
             self.last_frame_time = time.time()
             return self.last_frame_time, frame
@@ -240,17 +256,22 @@ class ESPHomeCameraWrapper(Camera):
 
 
 class LoggedImagePseudoCamera(Camera):
-    def __init__(self, image_dir: Path):
+    def __init__(self, image_dir: Path, resolution: tuple[int, int]):
         self.image_dir = image_dir
         self.last_frame = None
         self.last_frame_idx = 0
         self.timestamped_images = get_all_timestamped_files_sorted(image_dir)
         self._last_frame = None
+        self._resolution = resolution
+
+    @property
+    def resolution(self) -> tuple[int, int]:
+        return self._resolution
 
     def get_frame(self) -> tuple[float, cv.Mat]:
         self.last_frame_idx += 1
         ts, im = self.timestamped_images[self.last_frame_idx]
-        self._last_frame = cv.imread(str(im), cv.IMREAD_COLOR)
+        self._last_frame = _maybe_resize(cv.imread(str(im), cv.IMREAD_COLOR), self._resolution)
         return ts, self._last_frame
 
     def get_last_frame(self) -> tuple[float, cv.Mat]:
