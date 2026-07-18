@@ -186,8 +186,8 @@ def resolve_mqtt_config(main_config: dict) -> Optional[dict]:
                     "password": data.get("password"),
                 }
             )
-            # Let an mqtt: block still override topic/prefix (but not the broker).
-            for key in ("base_topic", "discovery_prefix"):
+            # Let an mqtt: block still override specific keys (but not the broker).
+            for key in ("base_topic", "discovery_prefix", "publish_images"):
                 if key in mqtt_cfg:
                     resolved[key] = mqtt_cfg[key]
             return resolved
@@ -198,12 +198,12 @@ def resolve_mqtt_config(main_config: dict) -> Optional[dict]:
 
 
 def publish_all_discovery(
-    publisher: MqttPublisher, config: dict, watch_for_class: list[str], *, publish_images: bool
+    publisher: MqttPublisher, main_config: dict, watch_for_class: list[str], *, publish_images: bool
 ) -> None:
     """Publish retained MQTT Discovery configs for every (camera, class): a confidence sensor
     plus an optional per-camera image entity.
     """
-    for cam_cfg in config["cameras"]:
+    for cam_cfg in main_config["cameras"]:
         monitor_name = cam_cfg.get("name", "")
         cam = slugify(monitor_name)
         node = f"camera_monitor_{cam}"

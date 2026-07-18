@@ -27,7 +27,8 @@ from app.camera_monitor import (
     OnGetImageCallback,
 )
 from app.cameras import ONVIFCameraWrapper
-from app.mqtt_client import MqttPublisher, resolve_mqtt_config, make_mqtt_callbacks
+from app.mqtt_client import MqttPublisher, resolve_mqtt_config, make_mqtt_callbacks, \
+    publish_all_discovery
 
 ONE_DAY_SECONDS = 24 * 60 * 60
 
@@ -224,9 +225,12 @@ def main(live: bool = False):
         publish_images = mqtt_cfg.pop("publish_images", False)
         publisher = MqttPublisher(**mqtt_cfg)
         publisher.connect()
+        publish_all_discovery(publisher, config, watch_for_class, publish_images=publish_images)
+
+        logger.info(f"MQTT Configured; publish_images={publish_images}")
 
         mqtt_on_state, mqtt_on_detections = make_mqtt_callbacks(
-            publisher, watch_for_class, publish_images
+            publisher, watch_for_class, publish_images=publish_images
         )
         state_callbacks.extend(mqtt_on_state)
         detection_callbacks.extend(mqtt_on_detections)
