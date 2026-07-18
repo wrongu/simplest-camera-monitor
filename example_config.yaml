@@ -7,7 +7,7 @@ cameras:
     password: !secret cam_pass # Password for camera authentication
     resolution: [1280, 720] # Desired resolution for processing (width, height); options determined by the camera itself
     log_lifespan: 43200.0 # Lifespan of log entries in seconds (e.g., 43200 for 12 hours); older images will automatically be cleaned up to save space.
-    detector_config: "path/to/mydetector.yaml"
+    detector_config: "path/to/mydetector.yaml"  # optional. passed to `create_detector` in detection.py
     roi: "/media/mycamera/roi.png" # Optional path to a binary mask image defining the region of interest (white areas are processed, black areas are ignored)
     confidence_threshold: 0.5  # If a detector is attached to this camera,
 media_root: "/media" # Images will be saved at <media_root>/<camera.name.lower()>/<YYYY>/<MM>/<DD>/<HHMMSS>.jpg
@@ -19,7 +19,7 @@ watch_for_class: # List of object classes as strings to report back to HA. Only 
   - person
 
 # --- Reporting to Home Assistant ------------------------------------------------------------
-reporting: "mqtt" # or "rest" for the REST api or "none" for no callbacks (local debugging)
+reporting: "mqtt" # or "none" for no callbacks (local debugging)
 mqtt_publish_images: false # publish an annotated "last detection" image entity per camera. Only valid in mqtt mode.
 
 # Extra config for MQTT. If running on Homeassistant, leave out 'host/port/username/password'. These will be auto

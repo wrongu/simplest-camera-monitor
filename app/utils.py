@@ -181,3 +181,8 @@ __all__ = [
     "get_logger",
     "chain_callbacks",
 ]
+
+
+def slugify(name: str) -> str:
+    """Camera name -> entity-id slug, matching the existing HA entity-id convention."""
+    return name.lower().replace(" ", "_")

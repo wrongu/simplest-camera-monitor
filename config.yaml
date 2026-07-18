@@ -3,7 +3,6 @@ description: "ONVIF camera motion detection and object classification"
 version: "1.5.5a"
 slug: "camera_monitor"
 init: false
-homeassistant_api: true # TODO - remove this if/when REST is removed
 host_network: true
 services:
   - mqtt:need # Supervisor injects the Mosquitto broker; credentials via the Services API
