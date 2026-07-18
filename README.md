@@ -6,33 +6,35 @@ ONVIF/ESPHome camera surveillance system for Home Assistant. Detects motion via 
 
 The project has three logically distinct components (currently co-located; restructuring is a planned next step):
 
-### 1. Camera Monitoring & Logging (`camera_monitor.py`, `cameras.py`, `background_model.py`, `image_loader.py`)
+### 1. Camera Monitoring & Logging (`app/camera_monitor.py`, `app/cameras.py`, `app/image_loader.py`, `app/detection.py`)
 
 The core engine. Each camera runs in its own `CameraMonitor` instance:
 
 - Polls frames at a configurable interval
-- Applies MOG2 background subtraction (time-adaptive, night-mode-aware)
-- Extracts foreground blobs and logs timestamped images to disk
+- Performs object detection with some detector imported from `detection.py`
 - State machine handles reconnection, reboot, and crash recovery
-- Optional object classification via a trained pickled model
+- Callbacks for state transitions, new images, and detection results
 
-Camera backends: ONVIF (`ONVIFCameraWrapper`), ESPHome HTTP (`ESPHomeCameraWrapper`), or offline image replay (`LoggedImagePseudoCamera`).
+Camera backends: ONVIF (`ONVIFCameraWrapper`), ESPHome HTTP (`ESPHomeCameraWrapper`), or offline 
+image replay (`LoggedImagePseudoCamera`).
 
-### 2. Annotation & Model Training (`annotator.py`, `classifier.py`)
+### 2. Annotation & Model Training (`app/annotator.py`, `app/classifier.py`, `models/train_yolo.py`)
 
 Offline tooling to build labeled training datasets and train a decision-tree classifier:
 
-- `annotator.py` — interactive OpenCV GUI for drawing bounding boxes and assigning class labels to detected blobs; saves JSON annotation files
-- `classifier.py` — loads annotations, featurizes blobs (Hu moments, color, bbox geometry), does grid-search CV over `DecisionTree + SelectKBest + StandardScaler`, saves a pickle
+- `app/annotator.py` — launches an in-browser app for drawing bounding boxes and assigning class labels to detected blobs; saves JSON annotation files. Annotation done separately for each camera.
+- `app/classifier.py` — deprecated scikit-learn classification
+- `models/export_yolo.py` — export from our custom annotation file format to ultralytics/YOLO format. Done once per camera.
+- `models/merge_yolo_datasets.py` — merge YOLO-style datasets from multiple cameras into one big dataset.
+- `models/train_yolo.py` — train and export a YOLO object detection model.
 
 ### 3. Home Assistant App (`main.py`, `config.yaml`, `Dockerfile`)
 
 Runs the monitor as a native HA App:
 
-- Reads camera config from `/config/camera_monitor.yaml` on the HA host
-- Reports detections to Home Assistant via **MQTT Discovery** (default) or the legacy
-  Supervisor REST API (`reporting: rest`)
-- Multi-threaded: poll loop + 4-hour cleanup loop
+- Reads camera config from `/config/camera_monitor.yaml` on the HA host (see `example_config.yaml`)
+- Reports detections to Home Assistant via **MQTT Discovery** (or set 'reporting' to 'none')
+- Multi-threaded: poll loop + cleanup loop
 - Docker image compiled from Alpine with OpenCV built from source
 
 ## Home Assistant entities (MQTT Discovery)
@@ -78,14 +80,50 @@ Replace `frontdoor` with your camera name slugified (lowercased, spaces → unde
 2. Install from **Settings → Add-ons → Local add-ons** (expected to take a while.. the docker image is slow to build)
 3. Start the add-on; logs appear in the add-on log panel
 
-Image logs are written to `/media/` (mapped via `media:rw` in `config.yaml`).
+Image logs are written to `/media/<cam>` (mapped via `media:rw` in `config.yaml`) per camera.
+
+Model training lifecycle: 
+
+1. periodically download data from the HA instance to permanently store it on a dev machine
+2. run the annotator script on that dev machine, once per camera
+3. export the annotations to YOLO format
+4. merge the YOLO datasets from all cameras into one big dataset
+5. train a YOLO model on the merged dataset and export to onnx
+6. look at run metrics... if good enough, upload new `best.onnx` back to homeassistant, wherever
+   the `detector_config` yaml files point to.
+
+__Example:__ if `best.onnx` is uploaded to `/addon_configs/local_camera_monitor/models/best.onnx` 
+on the HA instance, and `/addon_configs/local_camera_monitor/config.yaml` contains
+
+```yaml
+---
+cameras:
+  - name: "MyCamera"
+    # other config options here
+    detector_config: "/config/models/mydetector.yaml"
+    roi: "/media/mycamera/roi.png"
+    confidence_threshold: 0.5
+```
+
+...then on the HA instance, `/addon_configs/local_camera_monitor/models/mydetector.yaml` should look like
+
+```yaml
+---
+class: OnnxYoloDetectionModel
+weights: /config/models/best.onnx
+```
 
 ## Configuration
 
 The app expects a YAML file with a top-level `cameras` list. See `example_config.yaml`
 
-Secrets can be stored in a separate `secrets.yaml` and referenced with `!secret key`.
-
 ## Development Setup
 
-See [these HA docs](https://developers.home-assistant.io/docs/apps/testing).
+See [these HA docs](https://developers.home-assistant.io/docs/apps/testing) to do a full local HA test.
+
+Otherwise, run `main.py` with `--live-debug` and set the `CONFIG_PATH` environment variable. Example:
+
+    CONFIG_PATH=local/live.yaml python3 -m app.main --live-debug
+
+...and inside that local config file, set `reporting: none` or if using `reporting: mqtt`, be sure
+to set up the `mqtt` config block to point to a dev/debug `mqtt` broker.
