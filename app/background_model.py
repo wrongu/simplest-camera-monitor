@@ -78,6 +78,21 @@ class TimestampAwareBackgroundSubtractor(object):
         debug_dir: Optional[Path] = None,
         **kwargs,
     ):
+        self._uid = (
+            history_seconds,
+            var_threshold,
+            detect_shadows,
+            area_threshold,
+            shadow_correlation_threshold,
+            morph_radius,
+            morph_thresh,
+            morph_iters,
+            default_fps,
+            prep_hist_eq,
+            prep_blur,
+            target_size,
+        )
+
         # Parameters for the OpenCV background model
         self.history_seconds = history_seconds
         self.var_threshold = var_threshold

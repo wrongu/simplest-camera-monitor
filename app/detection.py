@@ -57,6 +57,8 @@ class BackgroundModelWithMorphologyClassifier(DetectionModel):
         self.label_lookup: dict[int, str] = model_metadata["label_lookup"]
         logger.info(f"Loaded model with labels: {self.label_lookup}")
 
+        self._uid = bg_model._uid + (str(model_file), brightness_threshold)
+
     @property
     def classes(self) -> list[str]:
         return list(self.label_lookup.values())
@@ -99,6 +101,8 @@ class YoloDetectionModel(DetectionModel):
         self.yolo = YOLO(weights, task="detect")
         self.brightness_threshold = brightness_threshold
 
+        self._uid = (str(weights), brightness_threshold)
+
     @property
     def classes(self) -> list[str]:
         return list(self.yolo.names.values())
@@ -135,6 +139,8 @@ class OnnxYoloDetectionModel(DetectionModel):
         self.img_size = tuple(literal_eval(meta.custom_metadata_map["imgsz"]))
         self.class_lookup = literal_eval(meta.custom_metadata_map["names"])
         self.brightness_threshold = brightness_threshold
+
+        self._uid = (str(weights), brightness_threshold)
 
     @property
     def classes(self) -> list[str]:
