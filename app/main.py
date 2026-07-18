@@ -3,7 +3,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from typing import Optional
@@ -369,7 +369,7 @@ def init_monitors(
 
     def init_camera(i, cam_config):
         cam_name = cam_config.get("name", str(i))
-        media_dir = media_root / cam_name.lower().replace(" ", "_")
+        output_dir = media_root / cam_name.lower().replace(" ", "_")
 
         if cam_config.get("detector_config", None) is not None:
             detector = create_detector(cam_config["detector_config"])
@@ -387,7 +387,7 @@ def init_monitors(
                 ),
                 name=cam_name,
                 detection_model=detector,
-                output_dir=media_dir,
+                output_dir=output_dir,
                 log_lifespan=cam_config.get("log_lifespan", ONE_DAY_SECONDS / 2),
                 on_get_image=on_get_image,
                 on_state_transition=on_state_transition,
@@ -417,16 +417,29 @@ def init_monitors(
 
 
 def poll_loop(monitors: list[CameraMonitor], interval: float) -> None:
+    in_flight: set[CameraMonitor] = set()
+    in_flight_lock = threading.Lock()
+
+    def poll_once(monitor: CameraMonitor) -> None:
+        try:
+            monitor.poll()
+        except Exception as e:
+            logger.error(f"Unexpected error in poll: {e}")
+        finally:
+            with in_flight_lock:
+                in_flight.discard(monitor)
+
     with ThreadPoolExecutor(max_workers=len(monitors), thread_name_prefix="poll") as executor:
         next_poll = time.monotonic() + interval
         while True:
-            futures = [executor.submit(m.poll) for m in monitors]
-            futures_wait(futures, timeout=interval)
-            for f in futures:
-                if f.done() and not f.cancelled():
-                    exc = f.exception()
-                    if exc is not None:
-                        logger.error(f"Unexpected error in poll: {exc}")
+            for m in monitors:
+                with in_flight_lock:
+                    if m in in_flight:
+                        logger.warning(f"Skipping poll for {m}: previous poll still running")
+                        continue
+                    in_flight.add(m)
+                executor.submit(poll_once, m)
+
             sleep_time = next_poll - time.monotonic()
             if sleep_time > 0:
                 time.sleep(sleep_time)
@@ -438,7 +451,10 @@ def poll_loop(monitors: list[CameraMonitor], interval: float) -> None:
 def cleanup_loop(monitors: list[CameraMonitor]) -> None:
     while True:
         for monitor in monitors:
-            monitor.cleanup_files()
+            try:
+                monitor.cleanup_files()
+            except Exception as e:
+                logger.error(f"Unexpected error in cleanup: {e}")
         time.sleep(ONE_DAY_SECONDS / 24)  # Run cleanup every hour
 
 
@@ -447,28 +463,24 @@ def cleanup_loop(monitors: list[CameraMonitor]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_live():
-    logger.info(f"Loading config from {CONFIG_PATH}")
-    with open(CONFIG_PATH) as f:
-        config = yaml.safe_load(f)
-
+def _init_live_callbacks():
     cv2.namedWindow("Live Monitor", cv2.WINDOW_NORMAL)
-
-    frames = defaultdict(lambda: np.zeros((360, 640, 3), dtype=np.uint8))
+    live_display_frames = defaultdict(lambda: np.zeros((360, 640, 3), dtype=np.uint8))
 
     def redraw():
-        try:
-            combo = np.concatenate(list(frames.values()), axis=1)
-            cv2.imshow("Live Monitor", combo)
-        except ValueError as e:
-            print(e)
+        if not live_display_frames:
+            return
+        combo = np.concatenate(list(live_display_frames.values()), axis=1)
+        cv2.imshow("Live Monitor", combo)
 
-    def handle_frame(mon: CameraMonitor, frame: np.ndarray, timestamp: float):
-        frames[mon.name] = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    def live_get_image_update(mon: CameraMonitor, frame: np.ndarray, timestamp: float):
+        live_display_frames[mon.name] = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-    def handle_state(mon: CameraMonitor, st: State):
+    def live_state_update(mon: CameraMonitor, st: State):
+        if mon.name not in live_display_frames:
+            return
         cv2.putText(
-            frames[mon.name],
+            live_display_frames[mon.name],
             f"STATE: {st}",
             (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
@@ -477,10 +489,12 @@ def run_live():
             2,
         )
 
-    def handle_detect(mon: CameraMonitor, boxes: list[BoundingBox]):
+    def live_detection_update(mon: CameraMonitor, boxes: list[BoundingBox]):
+        if mon.name not in live_display_frames:
+            return
         for box in boxes:
             box.draw(
-                frames[mon.name],
+                live_display_frames[mon.name],
                 color=(
                     int(127 * (1 - box.confidence)),
                     int(255 * box.confidence),
@@ -488,72 +502,30 @@ def run_live():
                 ),
             )
 
-    state_callbacks = [handle_state]
-    detection_callbacks = [handle_detect]
-    frame_callbacks = [handle_frame]
-
-    if config.get("reporting", "none") == "mqtt":
-        watch_for_class = ["person"]
-        logger.info("Reporting via MQTT Discovery")
-        mqtt_cfg = resolve_mqtt_config(config)
-        if mqtt_cfg is None:
-            logger.error(
-                "reporting: mqtt selected but no broker could be resolved. Add an mqtt: block "
-                "to the config, or run as an add-on with `services: [mqtt:need]`."
-            )
-            return
-        publisher = MqttPublisher(**mqtt_cfg)
-        publisher.connect()
-
-        publish_images = config.get("mqtt_publish_images", False)
-        # Discovery must be published before any state/availability so HA has the entities.
-        publish_all_discovery(publisher, config, watch_for_class, publish_images=publish_images)
-        state_callbacks.append(make_handle_state_transition_mqtt(publisher))
-        detection_callbacks.append(make_handle_detections_mqtt(publisher, watch_for_class))
-        if publish_images:
-            detection_callbacks.append(make_handle_image_mqtt(publisher))
-
-    monitors = init_monitors(
-        config,
-        on_get_image=chain_callbacks(*frame_callbacks),
-        on_state_transition=chain_callbacks(*state_callbacks),
-        on_detection=chain_callbacks(*detection_callbacks),
-    )
-    if not monitors:
-        logger.error("No cameras initialized. Exiting.")
-        return
-
-    # Initial file cleanup
-    for monitor in monitors:
-        monitor.cleanup_files()
-
-    def poll():
-        for mon in monitors:
-            mon.poll()
-        redraw()
-
-    poll()
-    last_poll = time.time()
-    while True:
-        if time.time() - last_poll > config["poll_frequency"]:
-            poll()
-            last_poll = time.time()
-
-        k = cv2.waitKey(1)
-        if k == ord("q"):
-            break
+    return redraw, live_get_image_update, live_state_update, live_detection_update
 
 
-def main():
+def main(live: bool = False):
     logger.info(f"Loading config from {CONFIG_PATH}")
     with open(CONFIG_PATH) as f:
         config = yaml.safe_load(f)
 
-    watch_for_class = config.get("watch_for_class", [])
-    reporting = config.get("reporting", "mqtt")
-
-    detection_callbacks: list[OnDetectionCallback] = []
     state_callbacks: list[OnStateTransitionCallback] = []
+    detection_callbacks: list[OnDetectionCallback] = []
+    get_image_callbacks: list[OnGetImageCallback] = []
+
+    if live:
+        redraw, live_get_image_update, live_state_update, live_detection_update = (
+            _init_live_callbacks()
+        )
+
+        state_callbacks.append(live_state_update)
+        detection_callbacks.append(live_detection_update)
+        get_image_callbacks.append(live_get_image_update)
+
+    watch_for_class = config.get("watch_for_class", [])
+    reporting = config.get("reporting", "none")
+
     publisher: Optional[MqttPublisher] = None
 
     if reporting == "rest":
@@ -593,11 +565,13 @@ def main():
 
     on_state_transition = chain_callbacks(*state_callbacks) if state_callbacks else None
     on_detection = chain_callbacks(*detection_callbacks) if detection_callbacks else None
+    on_get_image = chain_callbacks(*get_image_callbacks) if get_image_callbacks else None
 
     monitors = init_monitors(
         config,
         on_state_transition=on_state_transition,
         on_detection=on_detection,
+        on_get_image=on_get_image,
     )
     if not monitors:
         logger.error("No cameras initialized. Exiting.")
@@ -616,12 +590,20 @@ def main():
     )
     # Block the main thread indefinitely
     try:
-        threading.Event().wait()
+        if live:
+            while True:
+                redraw()
+                k = cv2.waitKey(100)
+                if k == ord("q"):
+                    raise KeyboardInterrupt()
+        else:
+            threading.Event().wait()
     except KeyboardInterrupt:
         logger.info("Shutting down")
     finally:
         if publisher is not None:
             publisher.disconnect()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
@@ -631,7 +613,4 @@ if __name__ == "__main__":
     parser.add_argument("--live-debug", action="store_true")
     args = parser.parse_args()
 
-    if args.live_debug:
-        run_live()
-    else:
-        main()
+    main(args.live_debug)

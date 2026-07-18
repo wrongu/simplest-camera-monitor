@@ -1,3 +1,4 @@
+import threading
 import time
 from enum import Enum
 from pathlib import Path
@@ -7,11 +8,7 @@ import cv2 as cv
 
 from app.cameras import Camera
 from app.detection import DetectionModel
-from app.image_loader import (
-    create_timestamped_filename,
-    get_all_timestamped_files_sorted,
-    ensure_files_timestamp_named,
-)
+from app.image_loader import create_timestamped_filename, get_all_timestamped_files_sorted
 from app.utils import get_logger, BoundingBox
 
 logger = get_logger("camera_monitor", batching=300)
@@ -63,11 +60,13 @@ class CameraMonitor(object):
 
         self.last_timestamp = 0
 
+        self._file_lock = threading.Lock()
         self.output_dir = Path(output_dir) if output_dir is not None else None
         if self.output_dir is not None:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-            if self.detector is not None:
-                self.detector.initialize_from_logs(self.output_dir)
+            with self._file_lock:
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+                if self.detector is not None:
+                    self.detector.initialize_from_logs(self.output_dir)
         self.log_lifespan = log_lifespan
         self.cleanup_files()
 
@@ -166,10 +165,10 @@ class CameraMonitor(object):
             except Exception as e:
                 logger.error(f"Error in on_detection callback: {e}")
 
-    @staticmethod
-    def _save_image(path: Path, image: cv.Mat):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        cv.imwrite(str(path), image)
+    def _save_image(self, path: Path, image: cv.Mat):
+        with self._file_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            cv.imwrite(str(path), image)
 
     def log_frame(self, frame: cv.Mat, timestamp: float) -> None:
         if timestamp <= self.last_timestamp:
@@ -193,22 +192,21 @@ class CameraMonitor(object):
         logger.info("Starting cleanup")
         now = time.time()
 
-        # Check that all logged filenames are appropriately timestamped
-        ensure_files_timestamp_named(self.output_dir, dry_run=False, glob="**/*.jpg")
+        with self._file_lock:
+            # Delete images that are older than 24h and detected blobs that are older than 72h
+            n_images_deleted = 0
+            for t, f in get_all_timestamped_files_sorted(self.output_dir, glob="20*/**/*.jpg"):
+                if now - t > self.log_lifespan:
+                    f.unlink()
+                    n_images_deleted += 1
+            logger.info(f"Deleted {n_images_deleted} old images")
+            get_all_timestamped_files_sorted.cache_clear()
 
-        # Delete images that are older than 24h and detected blobs that are older than 72h
-        n_images_deleted = 0
-        for t, f in get_all_timestamped_files_sorted(self.output_dir, glob="20*/**/*.jpg"):
-            if now - t > self.log_lifespan:
-                f.unlink()
-                n_images_deleted += 1
-        logger.info(f"Deleted {n_images_deleted} old images")
-
-        # Remove any remaining empty directories
-        for path, subdirs, files in self.output_dir.walk(top_down=False):
-            if not files and not subdirs and path != self.output_dir:
-                path.rmdir()
-        logger.info("Cleanup complete.")
+            # Remove any remaining empty directories
+            for path, subdirs, files in self.output_dir.walk(top_down=False):
+                if not files and not subdirs and path != self.output_dir:
+                    path.rmdir()
+            logger.info("Cleanup complete.")
 
     def _is_in_roi(self, box: BoundingBox):
         if self._roi_image is not None:

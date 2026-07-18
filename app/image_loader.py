@@ -41,9 +41,7 @@ def is_datetime_named(file: Path) -> bool:
 def get_file_time(file: Path) -> float:
     """Get the file timestamp; in a first pass, this is the file modification time. Files are then
     renamed based on this timestamp."""
-    match = timestamp_path_regex.search(str(file)) or timestamp_file_regex.search(
-        file.name
-    )
+    match = timestamp_path_regex.search(str(file)) or timestamp_file_regex.search(file.name)
     if match:
         year = int(match.group("year"))
         month = int(match.group("month"))
@@ -59,10 +57,8 @@ def get_file_time(file: Path) -> float:
 
 
 @functools.cache
-def get_all_timestamped_files_sorted(
-    directory: Path, glob="**/*.jpg"
-) -> list[tuple[float, Path]]:
-    return sorted([(get_file_time(f), f) for f in directory.glob(glob)])
+def get_all_timestamped_files_sorted(directory: Path, glob="**/*.jpg") -> list[tuple[float, Path]]:
+    return sorted([(get_file_time(f), f) for f in directory.glob(glob) if is_datetime_named(f)])
 
 
 def ensure_files_timestamp_named(directory: Path, dry_run: bool, glob="**/*.jpg"):
@@ -97,12 +93,8 @@ def ensure_files_timestamp_named(directory: Path, dry_run: bool, glob="**/*.jpg"
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Rename files based on their timestamps."
-    )
-    parser.add_argument(
-        "directory", type=Path, help="Directory containing the files to rename."
-    )
+    parser = argparse.ArgumentParser(description="Rename files based on their timestamps.")
+    parser.add_argument("directory", type=Path, help="Directory containing the files to rename.")
     parser.add_argument(
         "--dry-run",
         action="store_true",
