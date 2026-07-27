@@ -182,7 +182,7 @@ class CameraMonitor(object):
         # save the image
         if self.output_dir is not None:
             self._save_image(
-                self.output_dir / create_timestamped_filename(timestamp, ".jpg"), frame
+                self.output_dir / create_timestamped_filename(timestamp, ".jpg"), cv.cvtColor(frame, cv.COLOR_RGB2BGR)
             )
 
     def cleanup_files(self):
