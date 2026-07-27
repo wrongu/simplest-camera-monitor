@@ -2,7 +2,7 @@
 task: detect
 mode: train
 model: yolo26n.pt
-epochs: 30
+epochs: 50
 imgsz: 640
 #cache: 'ram'
 device: -1

@@ -32,6 +32,12 @@ import imagesize
 import yaml
 
 
+def remove_old_yolo_annotations(path: Path) -> None:
+    for txt_file in path.glob("**/*.txt"):
+        if txt_file.with_suffix(".jpg").exists():
+            txt_file.unlink()
+
+
 def load_raw_annotations(path: Path) -> tuple[dict, dict]:
     """Return (labels, images).
 
@@ -91,6 +97,7 @@ def main():
         "--neg-classes",
         nargs="+",
         metavar="NEG_CLASS",
+        default=[],
         help="Classes to use as an explicit source of negative examples. If an image is tagged as containing a "
         "negative class but none of the positive classes, it will be added to the yolo data as an image with no "
         "annotations.",
@@ -161,6 +168,10 @@ def main():
         print("Could not parse dates from image keys. Expected format: YYYY/MM/DD/HHMMSS.jpg")
         sys.exit(1)
 
+    image_dirs = set(Path(im).parent for im in images_dict.keys())
+    for idir in image_dirs:
+        remove_old_yolo_annotations(idir)
+
     if args.val_after:
         val_days = set(filter(lambda day: day >= args.val_after, all_dates))
     else:
@@ -179,7 +190,6 @@ def main():
 
     train_images, val_images = [], []
     class_counts = {"train": defaultdict(int), "val": defaultdict(int)}
-    n_neg = 0
 
     for image_key, boxes in images_dict.items():
         lines = []
@@ -193,10 +203,6 @@ def main():
             nw = max(0.0, min(1.0, bw / img_w))
             nh = max(0.0, min(1.0, bh / img_h))
             lines.append(f"{yolo_cls} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
-
-        if not lines:
-            n_neg += 1
-            continue
 
         # Write label file NEXT TO the source image so Ultralytics can find it.
         # Ultralytics resolves labels by swapping the extension when there is no
@@ -212,6 +218,8 @@ def main():
         else:
             val_images.append(image_key)
 
+        if not lines:
+            class_counts[split]["neg"] += 1
         for line in lines:
             cls_idx = int(line.split()[0])
             class_counts[split][args.classes[cls_idx]] += 1
@@ -235,12 +243,12 @@ def main():
     print(f"\nDone.")
     print(f"  Train images: {len(train_images)}")
     print(f"  Val images  : {len(val_images)}")
-    print(f"  Neg images: {n_neg}")
     print(f"  Annotations by class:")
     for cls in args.classes:
         t = class_counts["train"][cls]
         v = class_counts["val"][cls]
         print(f"    {cls}: {t} train, {v} val")
+    print(f"    neg: {class_counts['train']['neg']} train, {class_counts['val']['neg']} val")
     print(f"  Label files written alongside images in: {args.image_dir.resolve()}")
     print(f"  dataset.yaml: {yaml_path.resolve()}")
 
